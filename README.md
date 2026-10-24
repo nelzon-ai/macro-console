@@ -13,6 +13,9 @@ Installable, offline-first version of Macro Console. AI features (food parser, s
 - Android: open in Chrome → ⋮ → Install app.
 Open it once while online so it can cache itself, then it works offline.
 
+## Sync to a private repo (optional)
+Health data stays on the phone unless you turn sync on. The steps — private repo, a token that can only touch that repo, paste it into Settings → Sync — are in [SYNC.md](SYNC.md). The token is never stored in this repo.
+
 ## Move your existing data over
 1. In the claude.ai version: Settings → Copy full backup.
 2. In the new app: Settings → Restore, paste, confirm.

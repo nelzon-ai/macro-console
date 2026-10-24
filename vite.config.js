@@ -2,6 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+// Bump when shipping a new service worker so installed phones drop the old cache.
+const SW_CACHE_VERSION = "v2";
+
 export default defineConfig({
   base: "./", // works on GitHub Pages under /repo-name/ without extra config
   plugins: [
@@ -26,6 +29,8 @@ export default defineConfig({
         ],
       },
       workbox: {
+        cacheId: `macro-console-${SW_CACHE_VERSION}`,
+        cleanupOutdatedCaches: true,
         globPatterns: ["**/*.{js,css,html,png,svg,woff2}"],
         navigateFallback: "index.html",
         runtimeCaching: [

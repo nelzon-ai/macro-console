@@ -6,8 +6,12 @@ import {
 import {
   ChevronLeft, ChevronRight, ChevronDown, Settings, Flame, Scale, Droplets,
   Footprints, Dumbbell, Plus, Minus, X, Loader2, Lock, Unlock, BookOpen, LayoutDashboard,
-  TrendingUp, Copy, Send, Sparkles, Upload, Camera, Activity, Ruler, Pencil, BookmarkPlus, Images, Play, Pause, Check, Volume2, VolumeX, Pill
+  TrendingUp, Copy, Send, Sparkles, Upload, Camera, Activity, Ruler, Pencil, BookmarkPlus, Images, Play, Pause, Check, Volume2, VolumeX, Pill, Cloud
 } from "lucide-react";
+import {
+  DEFAULT_REPO, DEFAULT_BRANCH, loadSyncConfig, loadSyncStatus, saveSyncConfig, clearSyncToken,
+  registerPayloadGetter, subscribeSyncStatus, scheduleSync, syncNow, testConnection, installSyncRetries,
+} from "./githubSync.js";
 
 // ---------------------------------------------------------------------------
 // Palette / tokens — warm charcoal "instrument console" theme.
@@ -415,6 +419,14 @@ function fromDs(ds) {
 }
 function todayStr() { return toDs(new Date()); }
 function addDays(ds, delta) { const d = fromDs(ds); d.setDate(d.getDate() + delta); return toDs(d); }
+function formatSyncTime(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  } catch (e) {
+    return "";
+  }
+}
 function prettyDate(ds) {
   const d = fromDs(ds);
   return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
@@ -1099,6 +1111,12 @@ export default function MacroConsole() {
   const [importText, setImportText] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState("");
+  const [syncRepo, setSyncRepo] = useState(() => loadSyncConfig().repo);
+  const [syncBranch, setSyncBranch] = useState(() => loadSyncConfig().branch);
+  const [syncTokenInput, setSyncTokenInput] = useState("");
+  const [syncHasToken, setSyncHasToken] = useState(() => loadSyncConfig().hasToken);
+  const [syncStatus, setSyncStatus] = useState(() => loadSyncStatus());
+  const [syncBusy, setSyncBusy] = useState("");
   const [undoAction, setUndoAction] = useState(null);
   const toastTimer = useRef(null);
   const historyRef = useRef(history);
@@ -1107,6 +1125,11 @@ export default function MacroConsole() {
   const restIntervalRef = useRef(null);
   const nextIndexRef = useRef(null);
   const logContextFromRef = useRef(0);
+  const syncPayloadRef = useRef(null);
+
+  function queueCloudSync() {
+    scheduleSync();
+  }
 
   function showToast(msg) {
     setToast(msg);
@@ -1142,6 +1165,16 @@ export default function MacroConsole() {
       return null;
     }
   }
+
+  useEffect(() => {
+    registerPayloadGetter(() => (syncPayloadRef.current ? syncPayloadRef.current() : null));
+    const unsubscribe = subscribeSyncStatus(setSyncStatus);
+    const uninstallRetries = installSyncRetries();
+    return () => {
+      unsubscribe();
+      uninstallRetries();
+    };
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -1204,6 +1237,10 @@ export default function MacroConsole() {
       setTimeout(() => setReady(true), 60);
     })();
   }, []);
+
+  useEffect(() => {
+    if (!loading) scheduleSync();
+  }, [loading]);
 
   useEffect(() => {
     return () => {
@@ -1446,24 +1483,32 @@ export default function MacroConsole() {
     const newBodyComp = upsertBodyComp(bodyComp, entry);
     setBodyComp(newBodyComp);
     try { await window.storage.set("bodycomp", JSON.stringify(newBodyComp), false); } catch (e) {}
-    if (entry.date !== todayStr() || entry.weight == null) return isBfPB;
+    if (entry.date !== todayStr() || entry.weight == null) {
+      queueCloudSync();
+      return isBfPB;
+    }
     if (dateStr === todayStr()) {
       if (!dayData.locked) {
         const newDay = { ...dayData, weight: entry.weight };
         setDayData(newDay);
         await persist(newDay);
       }
+      queueCloudSync();
       return isBfPB;
     }
     // Viewing a different day right now — patch today's stored day directly so the weight is there when Today is opened
     try {
       const existing = await safeGet(`day:${todayStr()}`);
       const day = existing ? JSON.parse(existing) : emptyDay();
-      if (day.locked) return isBfPB;
+      if (day.locked) {
+        queueCloudSync();
+        return isBfPB;
+      }
       day.weight = entry.weight;
       await window.storage.set(`day:${todayStr()}`, JSON.stringify(day), false);
       await appendToHistory(todayStr(), day);
     } catch (e) {}
+    queueCloudSync();
     return isBfPB;
   }
 
@@ -1542,6 +1587,7 @@ export default function MacroConsole() {
     } catch (e) {
       showToast("Logged in session — storage still failing");
     }
+    queueCloudSync();
   }
 
   function lastLogForExercise(name, expectedSets) {
@@ -1925,6 +1971,7 @@ export default function MacroConsole() {
     const newRecipes = upsertRecipe(recipes, recipe);
     setRecipes(newRecipes);
     try { await window.storage.set("recipes", JSON.stringify(newRecipes), false); } catch (e) {}
+    queueCloudSync();
   }
 
   function selectRecipe(r) {
@@ -1940,7 +1987,10 @@ export default function MacroConsole() {
     showUndoToast(
       `Removed "${item.name}"`,
       () => { setRecipes((cur) => upsertRecipeById(cur, item)); },
-      async () => { try { await window.storage.set("recipes", JSON.stringify(newRecipes), false); } catch (e) {} }
+      async () => {
+        try { await window.storage.set("recipes", JSON.stringify(newRecipes), false); } catch (e) {}
+        queueCloudSync();
+      }
     );
   }
 
@@ -2009,6 +2059,7 @@ export default function MacroConsole() {
     const newRecipes = upsertRecipeById(recipes, recipe);
     setRecipes(newRecipes);
     try { await window.storage.set("recipes", JSON.stringify(newRecipes), false); } catch (e) {}
+    queueCloudSync();
   }
 
   async function saveRecipeForm() {
@@ -2112,6 +2163,7 @@ export default function MacroConsole() {
     setDayData(normalized);
     const ok = await persist(normalized);
     if (ok) showToast(isPB ? "New lowest weight — saved!" : "Saved");
+    queueCloudSync();
   }
 
   async function handleLock() {
@@ -2120,6 +2172,7 @@ export default function MacroConsole() {
     setDayData(normalized);
     const ok = await persist(normalized);
     if (ok) showToast(isPB ? "New lowest weight — day locked!" : "Day locked");
+    queueCloudSync();
   }
 
   async function handleUnlock() {
@@ -2127,6 +2180,7 @@ export default function MacroConsole() {
     setDayData(newDay);
     const ok = await persist(newDay);
     if (ok) showToast("Unlocked");
+    queueCloudSync();
   }
 
   function normalizeWorkout(day) {
@@ -2152,6 +2206,7 @@ export default function MacroConsole() {
     };
     setTargets(cleaned);
     try { await window.storage.set("targets", JSON.stringify(cleaned), false); } catch (e) {}
+    queueCloudSync();
     setSettingsOpen(false);
     showToast("Targets updated");
   }
@@ -2391,6 +2446,7 @@ export default function MacroConsole() {
       }
       setImportText("");
       showToast(anyStorageFailed ? "Restored into this session (storage still failing)" : "Restored and saved");
+      queueCloudSync();
     } catch (e) {
       setImportError("Restore failed partway through — check the data and try again.");
     } finally {
@@ -2467,6 +2523,7 @@ export default function MacroConsole() {
     } catch (e) {
       showToast("Recovered in this session but couldn't save — try again");
     }
+    queueCloudSync();
   }
 
   function buildDayForClaude() {
@@ -2582,6 +2639,44 @@ export default function MacroConsole() {
     setConfirmClear(false);
     setSettingsOpen(false);
     showToast("All data cleared");
+    queueCloudSync();
+  }
+
+  function persistSyncForm(overrides = {}) {
+    const typed = (overrides.token != null ? overrides.token : syncTokenInput).trim();
+    const repo = (overrides.repo != null ? overrides.repo : syncRepo).trim() || DEFAULT_REPO;
+    const branch = (overrides.branch != null ? overrides.branch : syncBranch).trim() || DEFAULT_BRANCH;
+    saveSyncConfig({ token: typed, repo, branch });
+    if (typed) {
+      setSyncHasToken(true);
+      setSyncTokenInput("");
+    }
+    if (repo !== syncRepo) setSyncRepo(repo);
+    if (branch !== syncBranch) setSyncBranch(branch);
+    return loadSyncConfig();
+  }
+
+  function closeSettings() {
+    persistSyncForm();
+    setSettingsOpen(false);
+  }
+
+  async function handleTestSync() {
+    persistSyncForm();
+    setSyncBusy("test");
+    try { await testConnection(); } finally { setSyncBusy(""); }
+  }
+
+  async function handleSyncNow() {
+    persistSyncForm();
+    setSyncBusy("sync");
+    try { await syncNow(); } finally { setSyncBusy(""); }
+  }
+
+  function handleDisconnectSync() {
+    clearSyncToken();
+    setSyncHasToken(false);
+    setSyncTokenInput("");
   }
 
   const totals = sumMacros(dayData.foods);
@@ -2747,6 +2842,8 @@ export default function MacroConsole() {
     if (dateStr !== todayStr()) goToDate(todayStr());
     setQuickLogOpen(true);
   }
+
+  syncPayloadRef.current = () => JSON.parse(buildFullBackup());
 
   if (loading) {
     return (
@@ -4208,11 +4305,11 @@ export default function MacroConsole() {
 
       {/* Settings modal */}
       {settingsOpen && (
-        <div className="fixed inset-0 flex items-center justify-center p-4 z-50" style={{ background: "rgba(0,0,0,0.7)" }}>
-          <div className="w-full max-w-sm rounded-2xl border p-5" style={{ background: palette.panel, borderColor: palette.border }}>
+        <div className="fixed inset-0 flex items-center justify-center p-4 z-50 overflow-y-auto" style={{ background: "rgba(0,0,0,0.7)" }}>
+          <div className="w-full max-w-sm rounded-2xl border p-5 my-auto max-h-[92vh] overflow-y-auto" style={{ background: palette.panel, borderColor: palette.border }}>
             <div className="flex items-center justify-between mb-4">
               <div className="font-display uppercase" style={{ color: palette.text, fontSize: 16, letterSpacing: "0.06em" }}>Targets</div>
-              <button onClick={() => setSettingsOpen(false)} aria-label="Close"><X size={18} style={{ color: palette.textMuted }} /></button>
+              <button onClick={closeSettings} aria-label="Close"><X size={18} style={{ color: palette.textMuted }} /></button>
             </div>
             <div className="space-y-3">
               {[
@@ -4272,6 +4369,89 @@ export default function MacroConsole() {
               <Button onClick={handleImport} variant="ghost" full disabled={importBusy || !importText.trim()}>
                 {importBusy ? "Restoring..." : "Restore"}
               </Button>
+            </div>
+            <div className="mt-5 pt-3 border-t" style={{ borderColor: palette.border }}>
+              <div className="flex items-center gap-2 mb-2">
+                <Cloud size={14} style={{ color: palette.textMuted }} />
+                <Label>Sync</Label>
+              </div>
+              <div className="font-mono mb-3" style={{ color: palette.textFaint, fontSize: 11, lineHeight: 1.45 }}>
+                Optional. Copies your backup to a private GitHub repo. The token stays on this phone only — it is never saved in the app. If you're offline, nothing here is lost and sync retries later.
+              </div>
+              <div className="mb-2">
+                <div className="font-mono mb-1" style={{ color: palette.textFaint, fontSize: 10 }}>Token</div>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={syncTokenInput}
+                  onChange={(e) => setSyncTokenInput(e.target.value)}
+                  onBlur={(e) => persistSyncForm({ token: e.target.value })}
+                  placeholder={syncHasToken ? "Saved on this phone — paste to replace" : "Paste token from GitHub"}
+                  className="w-full rounded-lg px-2 py-2 text-sm outline-none border"
+                  style={{ background: palette.panelAlt, borderColor: palette.border, color: palette.text }}
+                />
+              </div>
+              <div className="mb-2">
+                <div className="font-mono mb-1" style={{ color: palette.textFaint, fontSize: 10 }}>Private data repo</div>
+                <input
+                  type="text"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={syncRepo}
+                  onChange={(e) => setSyncRepo(e.target.value)}
+                  onBlur={(e) => persistSyncForm({ repo: e.target.value })}
+                  placeholder={DEFAULT_REPO}
+                  className="w-full rounded-lg px-2 py-2 text-sm font-mono outline-none border"
+                  style={{ background: palette.panelAlt, borderColor: palette.border, color: palette.text }}
+                />
+              </div>
+              <div className="mb-3">
+                <div className="font-mono mb-1" style={{ color: palette.textFaint, fontSize: 10 }}>Branch</div>
+                <input
+                  type="text"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={syncBranch}
+                  onChange={(e) => setSyncBranch(e.target.value)}
+                  onBlur={(e) => persistSyncForm({ branch: e.target.value })}
+                  placeholder={DEFAULT_BRANCH}
+                  className="w-full rounded-lg px-2 py-2 text-sm font-mono outline-none border"
+                  style={{ background: palette.panelAlt, borderColor: palette.border, color: palette.text }}
+                />
+              </div>
+              {(syncStatus.code === "public_repo" || syncStatus.code === "blocked_repo") && (
+                <div className="rounded-lg px-3 py-2 mb-3 font-mono" style={{ color: palette.alert, border: `1px solid ${palette.alert}`, fontSize: 11, lineHeight: 1.45 }} role="alert">
+                  {syncStatus.message}
+                </div>
+              )}
+              {syncStatus.message && syncStatus.code !== "public_repo" && syncStatus.code !== "blocked_repo" && (
+                <div className="font-mono mb-2" style={{ color: syncStatus.state === "error" || syncStatus.state === "pending" ? palette.rust : palette.textMuted, fontSize: 11, lineHeight: 1.45 }}>
+                  {syncStatus.message}
+                </div>
+              )}
+              {syncStatus.lastSyncedAt && (
+                <div className="font-mono mb-3" style={{ color: palette.textFaint, fontSize: 11 }}>
+                  Last synced {formatSyncTime(syncStatus.lastSyncedAt)}{syncStatus.pending ? " · waiting to retry" : ""}
+                </div>
+              )}
+              <div className="space-y-2">
+                <Button onClick={handleTestSync} variant="ghost" full disabled={syncBusy !== ""}>
+                  {syncBusy === "test" ? "Testing..." : "Test connection"}
+                </Button>
+                <Button onClick={handleSyncNow} full disabled={syncBusy !== ""}>
+                  {syncBusy === "sync" ? "Syncing..." : "Sync now"}
+                </Button>
+              </div>
+              {syncHasToken && (
+                <div className="mt-2">
+                  <Button onClick={handleDisconnectSync} variant="danger" full disabled={syncBusy !== ""}>Disconnect</Button>
+                </div>
+              )}
             </div>
             <div className="mt-5 pt-3 border-t" style={{ borderColor: palette.border }}>
               <Label>Recover missing history</Label>
