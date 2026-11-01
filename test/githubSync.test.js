@@ -231,7 +231,7 @@ test("writes latest.json and today's snapshot, creating files when they are miss
   const backup = JSON.parse(base64ToUtf8(puts[0].body.content));
   assert.equal(backup.today.day.weight, 174.4);
   assert.equal(JSON.stringify(backup).includes("test-token-not-real"), false);
-  assert.deepEqual(Object.keys(decoded), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts"]);
+  assert.deepEqual(Object.keys(decoded), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts", "applied"]);
   assert.equal(decoded.recipes[0].name, "Café oats");
   assert.equal(decoded.token, undefined);
   assert.equal(decoded.photo, undefined);
@@ -342,7 +342,7 @@ test("disconnect removes the token from storage", () => {
 
 test("payload keeps the export shape and drops anything else", () => {
   const payload = payloadForUpload(samplePayload());
-  assert.deepEqual(Object.keys(payload), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts"]);
+  assert.deepEqual(Object.keys(payload), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts", "applied"]);
   assert.equal(JSON.stringify(payload).includes("secret-photo"), false);
   assert.equal(JSON.stringify(payload).includes("should-never-upload"), false);
 });

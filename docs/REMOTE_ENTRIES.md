@@ -64,6 +64,42 @@ Sets the weight, in pounds, on that date. It does not replace other numbers on t
 }
 ```
 
+## Water
+
+Adds millilitres to the total already stored for that date. It does not replace the day's water. The phone stores that total as `water` on the day and on the matching history row. A glass logged on the phone and a water entry from the inbox are added together.
+
+`id` is required. The same id is counted once. Importing the file again, or sending the same id later, does not add the amount a second time. A newer `updatedAt` with a different `amount` replaces that id's contribution and leaves every other millilitre on the day alone.
+
+```json
+{
+  "type": "water",
+  "date": "2026-01-15",
+  "id": "water-example-1",
+  "updatedAt": "2026-01-15T14:00:00.000Z",
+  "amount": 250
+}
+```
+
+`amount` is millilitres and must be greater than 0.
+
+## Steps
+
+The phone stores one step count for the day (`steps` on the day and on the history row). The default inbox entry is that day total, not an extra walk on top of it. The stored count becomes the higher of the number already there and `count`. A lower `count` does not reduce steps that were tapped in on the phone. The same id can be imported again without adding on top.
+
+Set `"mode": "add"` only when `count` is an extra amount to add once, the same rule as water. Without `mode`, or with `"mode": "max"`, it is the day total.
+
+```json
+{
+  "type": "steps",
+  "date": "2026-01-15",
+  "id": "steps-example-1",
+  "updatedAt": "2026-01-15T18:00:00.000Z",
+  "count": 4000
+}
+```
+
+`id` is required. `count` must be greater than 0. `amount` is accepted as another name for `count`.
+
 ## Workout
 
 Marks that date as trained. This is the day's workout flag (`done`, a short label, and minutes). Per-set weights logged in the workout screen stay on the phone; they are not part of this file.
@@ -165,6 +201,8 @@ If the same row is edited again with an `updatedAt` later than `deletedAt`, the 
 | `measurements` | `date` |
 | `workouts` | `date` (clears that day's workout flag) |
 | `days` | `date` (clears that day's log detail) |
+| `water` | `id` (subtracts that entry's millilitres, leaves the rest of the day) |
+| `steps` | `id` (an `add` entry subtracts its count; a day-total entry does not lower the stored count) |
 
 The same object can be placed in `data/latest.json` under `deleted` instead of an inbox entry:
 
@@ -247,6 +285,20 @@ A `settings` object inside `data/latest.json` is not applied on its own. The pho
       "carbs": 50,
       "fat": 6,
       "fiber": 8
+    },
+    {
+      "type": "water",
+      "date": "2026-01-15",
+      "id": "water-example-1",
+      "updatedAt": "2026-01-15T14:00:00.000Z",
+      "amount": 250
+    },
+    {
+      "type": "steps",
+      "date": "2026-01-15",
+      "id": "steps-example-1",
+      "updatedAt": "2026-01-15T18:00:00.000Z",
+      "count": 4000
     }
   ]
 }
