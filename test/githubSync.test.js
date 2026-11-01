@@ -32,6 +32,7 @@ import {
   recordTombstone,
   weeklyBackupDue,
   loadLastWeeklyBackupDate,
+  shouldReplaceSyncReport,
 } from "../src/githubSync.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -567,7 +568,7 @@ test("the same additive inbox file cannot apply twice when upload fails and the 
   const first = await syncNow();
   assert.equal(first.ok, false);
   assert.equal(loadSyncReport().ok, false);
-  assert.equal(loadSyncReport().problem, "Upload failed");
+  assert.equal(loadSyncReport().problem, "Latest upload failed");
   assert.equal(loadSyncReport().imported, "1 water, 1 steps");
   assert.equal(state.water, 650);
   assert.equal(state.steps, 1400);
@@ -581,6 +582,103 @@ test("the same additive inbox file cannot apply twice when upload fails and the 
   assert.equal(state.steps, 1400);
   assert.equal(state.calories, 100);
   assert.equal(state.foods, 1);
+});
+
+test("a busy read after the upload still reports success", async () => {
+  setup();
+  let historyGets = 0;
+  const { calls } = installHappyFetch({
+    onGet(path) {
+      if (!path.startsWith("data/history/")) return null;
+      historyGets += 1;
+      if (historyGets < 3) return json(409, { message: "Conflict" });
+      return json(404, { message: "Not Found" });
+    },
+  });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  assert.equal(loadSyncReport().ok, true);
+  assert.equal(loadSyncReport().problem, "");
+  assert.ok(calls.some((call) => call.method === "PUT" && call.url.includes("data/latest.json")));
+  assert.ok(calls.some((call) => call.method === "PUT" && call.url.includes("data/history/")));
+});
+
+test("a real snapshot failure names that step and the next success clears it", async () => {
+  setup();
+  let blockHistory = true;
+  installHappyFetch({
+    onGet(path) {
+      if (blockHistory && path.startsWith("data/history/")) return json(409, { message: "Conflict" });
+      return null;
+    },
+  });
+  const failed = await syncNow();
+  assert.equal(failed.ok, false);
+  assert.equal(loadSyncReport().ok, false);
+  assert.match(loadSyncReport().problem, /Daily snapshot/);
+  assert.equal(loadSyncReport().problem.includes("Upload failed"), false);
+  blockHistory = false;
+  const again = await syncNow();
+  assert.equal(again.ok, true);
+  assert.equal(loadSyncReport().ok, true);
+  assert.equal(loadSyncReport().problem, "");
+});
+
+test("a conflict after the latest file already matches does not fail the sync", async () => {
+  setup();
+  let uploaded = "";
+  const { calls } = installHappyFetch({
+    latestSha: "sha-old",
+    latestText: "{}\n",
+    onPut(call, shas) {
+      if (!call.url.includes("data/latest.json")) return null;
+      uploaded = base64ToUtf8(call.body.content);
+      shas[LATEST_PATH] = "sha-landed";
+      return json(409, { message: "Conflict" });
+    },
+    onGet(path) {
+      if (path !== LATEST_PATH || !uploaded) return null;
+      return json(200, { sha: "sha-landed", type: "file", content: utf8ToBase64(uploaded) });
+    },
+  });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  assert.equal(loadSyncReport().ok, true);
+  assert.equal(loadSyncReport().problem, "");
+  assert.equal(calls.filter((call) => call.method === "PUT" && call.url.includes("data/latest.json")).length, 1);
+});
+
+test("an older failure cannot replace a success that already finished", async () => {
+  setup();
+  installHappyFetch();
+  assert.equal((await syncNow()).ok, true);
+  const successAt = Date.parse(loadSyncReport().at);
+  setSyncClock(() => new Date(successAt - 60000));
+  setSyncFetch(async (url, init = {}) => {
+    const method = init.method || "GET";
+    const u = String(url);
+    if (/\/repos\/[^/]+\/[^/]+$/.test(u.replace("https://api.github.com", ""))) {
+      return json(200, { private: true, visibility: "private", default_branch: "main" });
+    }
+    if (u.includes("/branches/")) return json(200, { name: "main" });
+    if (u.includes("/contents/") && method === "GET") {
+      const path = decodeURIComponent(u.split("/contents/")[1].split("?")[0]);
+      if (path.startsWith("data/history/")) return json(409, { message: "Conflict" });
+      if (path === "data/latest.json") return json(200, { sha: "sha-latest", type: "file", content: utf8ToBase64("{}\n") });
+      return json(404, { message: "Not Found" });
+    }
+    if (method === "PUT") return json(201, { content: { sha: "sha-ok" } });
+    return json(404, { message: "missing" });
+  });
+  const lagged = await syncNow();
+  assert.equal(lagged.ok, false);
+  assert.equal(loadSyncReport().ok, true);
+  assert.equal(loadSyncReport().problem, "");
+  const older = { ok: true, partial: false, at: "2026-11-01T18:12:26.000Z" };
+  const failure = { ok: false, partial: false, problem: "Daily snapshot failed" };
+  assert.equal(shouldReplaceSyncReport(older, failure, Date.parse("2026-11-01T18:11:10.000Z")), false);
+  assert.equal(shouldReplaceSyncReport(older, failure, Date.parse("2026-11-01T18:13:00.000Z")), true);
+  assert.equal(shouldReplaceSyncReport(older, { ok: true, partial: false }, Date.parse("2026-11-01T18:11:10.000Z")), true);
 });
 
 test("weekly backup is written at most once every 7 days and never deleted", async () => {
