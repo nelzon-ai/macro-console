@@ -321,6 +321,27 @@ test("steps keep the higher day total unless the entry says to add", () => {
   assert.equal(addedTwice.document.days[0].day.water, 100);
 });
 
+test("a saved water credit is added only if the earlier total is still showing", () => {
+  const local = base({
+    history: [historyRow("2026-01-08", { calories: 100, water: 400 })],
+    days: [day("2026-01-08", [food("food-1", "Example oats", 100)], { water: 400 })],
+  });
+  const file = inboxFile("water.json", [
+    { type: "water", date: "2026-01-08", id: "water-example-1", updatedAt: NOW, amount: 250 },
+  ]);
+  const once = mergeWithInbox(local, {}, [file], NOW);
+  const rolled = JSON.parse(JSON.stringify(once.document));
+  const baseWater = rolled.applied[0].base;
+  rolled.days[0].day.water = baseWater;
+  rolled.history[0].water = baseWater;
+  const repaired = mergeWithInbox(rolled, rolled, [file], NOW);
+  assert.equal(repaired.document.days[0].day.water, baseWater + 250);
+  assert.equal(repaired.document.history[0].calories, 100);
+  const again = mergeWithInbox(repaired.document, repaired.document, [file], NOW);
+  assert.equal(again.document.days[0].day.water, baseWater + 250);
+  assert.equal(again.document.days[0].day.foods[0].id, "food-1");
+});
+
 test("a merge with no inbox leaves existing totals and rows unchanged", () => {
   const local = base({
     history: [historyRow("2026-01-08", { calories: 100, water: 400, steps: 3000, weight: 150 })],

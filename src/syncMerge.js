@@ -782,24 +782,46 @@ function applyActivityCredits({ days, history, applied, credits, tombstones, con
       continue;
     }
     if (credit.mode === "add") {
-      if (existing && existing.amount === credit.amount && existing.date === credit.date) continue;
-      const incomingIsNewer = !existing || newerSide(existing.updatedAt, credit.updatedAt) !== "local";
-      if (existing && !incomingIsNewer) continue;
+      const amount = Number(credit.amount) || 0;
+      const rows = ensureActivityRows(days, history, credit.date);
+      const current = readActivityTotal(rows.rec, rows.row, credit.kind);
+      if (existing && existing.date === credit.date) {
+        const base = existing.base == null ? null : Number(existing.base);
+        // base is the total before this id was added. If the phone still shows
+        // that total, the add never landed and it is safe to add once.
+        if (base != null && base === current) {
+          writeActivityTotal(rows.rec, rows.row, credit.kind, current + amount);
+        } else if (base == null && existing.amount !== amount && newerSide(existing.updatedAt, credit.updatedAt) !== "local") {
+          writeActivityTotal(rows.rec, rows.row, credit.kind, current + (amount - (Number(existing.amount) || 0)));
+        }
+        byKey.set(key, {
+          kind: credit.kind,
+          id: credit.id,
+          date: credit.date,
+          amount,
+          mode: "add",
+          base: base == null ? current - (Number(existing.amount) || 0) : base,
+          updatedAt: credit.updatedAt || existing.updatedAt || null,
+        });
+        continue;
+      }
       if (existing && existing.date && existing.date !== credit.date) {
+        if (newerSide(existing.updatedAt, credit.updatedAt) === "local") {
+          byKey.set(key, existing);
+          continue;
+        }
         const oldRows = ensureActivityRows(days, history, existing.date);
         const oldTotal = readActivityTotal(oldRows.rec, oldRows.row, credit.kind);
         writeActivityTotal(oldRows.rec, oldRows.row, credit.kind, oldTotal - (Number(existing.amount) || 0));
       }
-      const rows = ensureActivityRows(days, history, credit.date);
-      const current = readActivityTotal(rows.rec, rows.row, credit.kind);
-      const previous = existing && existing.date === credit.date ? (Number(existing.amount) || 0) : 0;
-      writeActivityTotal(rows.rec, rows.row, credit.kind, current - previous + (Number(credit.amount) || 0));
+      writeActivityTotal(rows.rec, rows.row, credit.kind, current + amount);
       byKey.set(key, {
         kind: credit.kind,
         id: credit.id,
         date: credit.date,
-        amount: credit.amount,
+        amount,
         mode: "add",
+        base: current,
         updatedAt: credit.updatedAt || null,
       });
       continue;
