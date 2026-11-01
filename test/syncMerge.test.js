@@ -232,6 +232,111 @@ test("an inbox edit with a time beats an unstamped phone row", () => {
   assert.equal(merged.document.conflicts.some((item) => item.collection === "foods" && item.dropped.calories === 100), true);
 });
 
+function inboxFile(name, entries) {
+  return { name, body: JSON.stringify({ id: name, createdAt: NOW, entries }) };
+}
+
+test("water adds to the day total once, and other history stays put", () => {
+  const foodA = food("food-1", "Example oats", 100, EARLIER);
+  const local = base({
+    history: [
+      historyRow("2026-01-07", { calories: 50, water: 100, steps: 2000 }),
+      historyRow("2026-01-08", { calories: 100, water: 400, steps: 3000, weight: 150 }),
+    ],
+    days: [
+      day("2026-01-07", [], { water: 100, steps: 2000 }),
+      day("2026-01-08", [foodA], { water: 400, steps: 3000, weight: 150 }),
+    ],
+    recipes: [{ id: "recipe-1", name: "Example oats", calories: 100 }],
+  });
+  const file = inboxFile("water.json", [
+    { type: "water", date: "2026-01-08", id: "water-example-1", updatedAt: NOW, amount: 250 },
+  ]);
+  const once = mergeWithInbox(local, local, [file], NOW);
+  const day8 = once.document.days.find((rec) => rec.date === "2026-01-08");
+  const day7 = once.document.days.find((rec) => rec.date === "2026-01-07");
+  assert.equal(day8.day.water, 650);
+  assert.equal(once.document.history.find((row) => row.date === "2026-01-08").water, 650);
+  assert.equal(once.document.history.find((row) => row.date === "2026-01-08").calories, 100);
+  assert.equal(once.document.history.find((row) => row.date === "2026-01-08").weight, 150);
+  assert.equal(day8.day.steps, 3000);
+  assert.equal(day8.day.foods.length, 1);
+  assert.equal(day8.day.foods[0].name, "Example oats");
+  assert.deepEqual(Object.keys(day8.day).sort(), ["foods", "locked", "steps", "water", "weight", "workout"]);
+  assert.equal(day7.day.water, 100);
+  assert.equal(once.document.history.find((row) => row.date === "2026-01-07").calories, 50);
+  assert.equal(once.document.recipes.length, 1);
+  assert.equal(once.document.applied.some((item) => item.id === "water-example-1" && item.amount === 250), true);
+
+  const twice = mergeWithInbox(once.document, once.document, [file], NOW);
+  assert.equal(twice.document.days.find((rec) => rec.date === "2026-01-08").day.water, 650);
+  assert.equal(twice.document.history.find((row) => row.date === "2026-01-08").calories, 100);
+  assert.equal(twice.document.days.find((rec) => rec.date === "2026-01-07").day.water, 100);
+});
+
+test("deleting a water credit removes only that amount", () => {
+  const local = base({
+    history: [historyRow("2026-01-08", { calories: 100, water: 400 })],
+    days: [day("2026-01-08", [food("food-1", "Example oats", 100)], { water: 400 })],
+  });
+  const added = mergeWithInbox(local, {}, [inboxFile("water.json", [
+    { type: "water", date: "2026-01-08", id: "water-example-1", updatedAt: NOW, amount: 250 },
+  ])], NOW);
+  const removed = mergeWithInbox(added.document, {}, [inboxFile("delete-water.json", [
+    { type: "delete", collection: "water", id: "water-example-1", date: "2026-01-08", deletedAt: LATER },
+  ])], LATER);
+  assert.equal(removed.document.days[0].day.water, 400);
+  assert.equal(removed.document.history[0].calories, 100);
+  assert.equal(removed.document.days[0].day.foods[0].id, "food-1");
+  assert.equal(removed.document.applied.some((item) => item.id === "water-example-1"), false);
+});
+
+test("steps keep the higher day total unless the entry says to add", () => {
+  const local = base({
+    history: [historyRow("2026-01-08", { calories: 80, steps: 3000, water: 100 })],
+    days: [day("2026-01-08", [], { steps: 3000, water: 100 })],
+  });
+  const raised = mergeWithInbox(local, {}, [inboxFile("steps.json", [
+    { type: "steps", date: "2026-01-08", id: "steps-example-1", updatedAt: NOW, count: 8000 },
+  ])], NOW);
+  assert.equal(raised.document.days[0].day.steps, 8000);
+  assert.equal(raised.document.days[0].day.water, 100);
+  assert.equal(raised.document.history[0].calories, 80);
+  const again = mergeWithInbox(raised.document, raised.document, [inboxFile("steps.json", [
+    { type: "steps", date: "2026-01-08", id: "steps-example-1", updatedAt: NOW, count: 8000 },
+  ])], NOW);
+  assert.equal(again.document.days[0].day.steps, 8000);
+  const lower = mergeWithInbox(again.document, {}, [inboxFile("steps-low.json", [
+    { type: "steps", date: "2026-01-08", id: "steps-example-1", updatedAt: LATER, count: 1000 },
+  ])], LATER);
+  assert.equal(lower.document.days[0].day.steps, 8000);
+  const added = mergeWithInbox(local, {}, [inboxFile("steps-add.json", [
+    { type: "steps", date: "2026-01-08", id: "steps-add-1", updatedAt: NOW, count: 500, mode: "add" },
+  ])], NOW);
+  assert.equal(added.document.days[0].day.steps, 3500);
+  const addedTwice = mergeWithInbox(added.document, added.document, [inboxFile("steps-add.json", [
+    { type: "steps", date: "2026-01-08", id: "steps-add-1", updatedAt: NOW, count: 500, mode: "add" },
+  ])], NOW);
+  assert.equal(addedTwice.document.days[0].day.steps, 3500);
+  assert.equal(addedTwice.document.days[0].day.water, 100);
+});
+
+test("a merge with no inbox leaves existing totals and rows unchanged", () => {
+  const local = base({
+    history: [historyRow("2026-01-08", { calories: 100, water: 400, steps: 3000, weight: 150 })],
+    days: [day("2026-01-08", [food("food-1", "Example oats", 100)], { water: 400, steps: 3000, weight: 150 })],
+    recipes: [{ id: "recipe-1", name: "Example stew", calories: 80 }],
+  });
+  const merged = mergeWithInbox(local, local, [], NOW);
+  assert.equal(merged.document.days[0].day.water, 400);
+  assert.equal(merged.document.days[0].day.steps, 3000);
+  assert.equal(merged.document.days[0].day.weight, 150);
+  assert.equal(merged.document.history[0].calories, 100);
+  assert.equal(merged.document.days[0].day.foods[0].calories, 100);
+  assert.equal(merged.document.recipes[0].name, "Example stew");
+  assert.equal(merged.document.applied.length, 0);
+});
+
 test("stampLocalChanges marks an edit and leaves untouched rows alone", () => {
   const previous = base({
     history: [historyRow("2026-01-01", { calories: 100, updatedAt: EARLIER })],

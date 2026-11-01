@@ -36,6 +36,7 @@ const KEYS = {
   preBackup: PRE_TWO_WAY_BACKUP_KEY,
   remoteBackupAt: "macroConsole.sync.remoteBackupAt",
   tombstones: "macroConsole.sync.tombstones",
+  applied: "macroConsole.sync.appliedCredits",
   lastMerged: "macroConsole.sync.lastMerged",
 };
 
@@ -259,6 +260,7 @@ export function payloadForUpload(source) {
     days: source && Array.isArray(source.days) ? source.days : [],
     deleted: source && Array.isArray(source.deleted) ? source.deleted : [],
     conflicts: source && Array.isArray(source.conflicts) ? source.conflicts : [],
+    applied: source && Array.isArray(source.applied) ? source.applied : [],
   };
 }
 
@@ -289,6 +291,23 @@ function saveTombstones(list) {
   writeKey(KEYS.tombstones, JSON.stringify(list));
 }
 
+function loadApplied() {
+  return loadJsonList(KEYS.applied);
+}
+
+function saveApplied(list) {
+  writeKey(KEYS.applied, JSON.stringify(list || []));
+}
+
+function dedupeApplied(list) {
+  const byKey = new Map();
+  for (const item of list || []) {
+    if (!item || !item.kind || !item.id) continue;
+    byKey.set(`${item.kind}:${item.id}`, item);
+  }
+  return [...byKey.values()];
+}
+
 function loadLastMerged() {
   const raw = readKey(KEYS.lastMerged);
   if (!raw) return null;
@@ -310,6 +329,7 @@ function tombstoneIdentity(tomb) {
   if (!tomb || !tomb.collection) return "";
   if (tomb.collection === "foods") return `foods:${tomb.date || ""}:${tomb.id || ""}`;
   if (tomb.collection === "recipes") return `recipes:${tomb.id || ""}:${String(tomb.name || "").toLowerCase()}`;
+  if (tomb.collection === "water" || tomb.collection === "steps") return tomb.id ? `${tomb.collection}:${tomb.id}` : "";
   return `${tomb.collection}:${tomb.date || ""}`;
 }
 
@@ -567,6 +587,7 @@ function dedupeTombs(list) {
 function localDocumentFromPayload(payload, now) {
   const uploaded = payloadForUpload(payload);
   uploaded.deleted = dedupeTombs([...(uploaded.deleted || []), ...loadTombstones()]);
+  uploaded.applied = dedupeApplied([...(uploaded.applied || []), ...loadApplied()]);
   return stampLocalChanges(uploaded, loadLastMerged(), now);
 }
 
@@ -684,6 +705,7 @@ async function uploadOneWay(cfg, localText) {
   try {
     const saved = JSON.parse(localText);
     saveTombstones(saved.deleted || []);
+    saveApplied(saved.applied || []);
     saveLastMerged(saved);
   } catch { /* the upload already succeeded; a bad local parse must not fail the sync */ }
   return finishSynced(null, "Synced to your private repo.");
@@ -791,6 +813,7 @@ async function runSyncBody() {
       await markInboxProcessed(cfg, accepted);
     } catch { /* next sync imports the same file again; ids keep that from duplicating */ }
     saveTombstones(document.deleted || []);
+    saveApplied(document.applied || []);
     saveLastMerged(document);
     return finishSynced(prev, "Synced. This phone and the private repo now share one merged backup.");
   } catch (err) {

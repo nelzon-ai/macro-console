@@ -36,6 +36,8 @@ export function emptyDocument(partial = {}) {
     days: Array.isArray(source.days) ? clone(source.days) : [],
     deleted: Array.isArray(source.deleted) ? clone(source.deleted) : [],
     conflicts: Array.isArray(source.conflicts) ? clone(source.conflicts) : [],
+    applied: Array.isArray(source.applied) ? clone(source.applied) : [],
+    credits: Array.isArray(source.credits) ? clone(source.credits) : [],
   };
 }
 
@@ -112,6 +114,10 @@ function tombstoneKey(tomb) {
     if (!tomb.id) return "";
     return `foods:${tomb.date || ""}:${tomb.id}`;
   }
+  if (collection === "water" || collection === "steps") {
+    if (!tomb.id) return "";
+    return `${collection}:${tomb.id}`;
+  }
   if (!tomb.date) return "";
   return `${collection}:${tomb.date}`;
 }
@@ -127,6 +133,9 @@ function entryMatchesTombstone(tomb, collection, identity, date) {
     if (tomb.id && identity === `id:${tomb.id}`) return true;
     if (!tomb.id && tomb.name && identity === `name:${String(tomb.name).trim().toLowerCase()}`) return true;
     return false;
+  }
+  if (collection === "water" || collection === "steps") {
+    return !!tomb.id && tomb.id === identity;
   }
   return tomb.date && tomb.date === identity;
 }
@@ -650,6 +659,15 @@ export function mergeDocuments(localRaw, remoteRaw, options = {}) {
   });
   history = raiseHistoryFromFoods(history, days);
   enforceWorkoutTombstones(days, history, deleted);
+  const applied = applyActivityCredits({
+    days,
+    history,
+    applied: [...(local.applied || []), ...(remote.applied || [])],
+    credits: [...(local.credits || []), ...(remote.credits || [])],
+    tombstones: deleted,
+    conflicts,
+    now,
+  });
 
   const todayDate = local.today && local.today.date;
   let today = local.today ? clone(local.today) : null;
@@ -676,8 +694,154 @@ export function mergeDocuments(localRaw, remoteRaw, options = {}) {
     days,
     deleted,
     conflicts,
+    applied,
+    credits: [],
   };
   return { document };
+}
+
+function activityKey(item) {
+  if (!item || !item.kind || !item.id) return "";
+  return `${item.kind}:${item.id}`;
+}
+
+function ensureActivityRows(days, history, date) {
+  let rec = days.find((item) => item.date === date);
+  if (!rec) {
+    rec = { date, updatedAt: null, day: blankDay() };
+    days.push(rec);
+  }
+  if (!rec.day) rec.day = blankDay();
+  let row = history.find((item) => item.date === date);
+  if (!row) {
+    row = {
+      date,
+      calories: 0,
+      protein: 0,
+      carbs: 0,
+      fat: 0,
+      fiber: 0,
+      weight: null,
+      water: Number(rec.day.water) || 0,
+      steps: rec.day.steps == null ? null : rec.day.steps,
+      workoutDone: !!(rec.day.workout && rec.day.workout.done),
+    };
+    history.push(row);
+  }
+  return { rec, row };
+}
+
+function readActivityTotal(rec, row, kind) {
+  if (kind === "water") return Number(rec.day.water || row.water) || 0;
+  const value = rec.day.steps != null ? rec.day.steps : row.steps;
+  return Number(value) || 0;
+}
+
+function writeActivityTotal(rec, row, kind, value) {
+  const next = Math.max(0, Number(value) || 0);
+  if (kind === "water") {
+    rec.day.water = next;
+    row.water = next;
+    return;
+  }
+  rec.day.steps = next;
+  row.steps = next;
+}
+
+function applyActivityCredits({ days, history, applied, credits, tombstones, conflicts, now }) {
+  const byKey = new Map();
+  for (const item of applied || []) {
+    const key = activityKey(item);
+    if (!key) continue;
+    byKey.set(key, { ...item });
+  }
+  const ordered = [...(credits || [])].filter((item) => activityKey(item)).sort((a, b) => activityKey(a).localeCompare(activityKey(b)));
+  for (const credit of ordered) {
+    const key = activityKey(credit);
+    const existing = byKey.get(key);
+    const tomb = tombstoneWins(tombstones, credit.kind, credit.id, credit.date, credit.updatedAt);
+    if (tomb) {
+      if (existing && (existing.kind === "water" || existing.mode === "add")) {
+        const rows = ensureActivityRows(days, history, existing.date || credit.date);
+        const current = readActivityTotal(rows.rec, rows.row, existing.kind);
+        writeActivityTotal(rows.rec, rows.row, existing.kind, current - (Number(existing.amount) || 0));
+      }
+      if (existing) {
+        pushConflict(conflicts, {
+          at: now,
+          collection: credit.kind,
+          identity: credit.id,
+          date: existing.date || credit.date,
+          resolution: "deleted",
+          reason: "deleted",
+          deletedAt: tomb.deletedAt,
+          dropped: clone(existing),
+        });
+        byKey.delete(key);
+      }
+      continue;
+    }
+    if (credit.mode === "add") {
+      if (existing && existing.amount === credit.amount && existing.date === credit.date) continue;
+      const incomingIsNewer = !existing || newerSide(existing.updatedAt, credit.updatedAt) !== "local";
+      if (existing && !incomingIsNewer) continue;
+      if (existing && existing.date && existing.date !== credit.date) {
+        const oldRows = ensureActivityRows(days, history, existing.date);
+        const oldTotal = readActivityTotal(oldRows.rec, oldRows.row, credit.kind);
+        writeActivityTotal(oldRows.rec, oldRows.row, credit.kind, oldTotal - (Number(existing.amount) || 0));
+      }
+      const rows = ensureActivityRows(days, history, credit.date);
+      const current = readActivityTotal(rows.rec, rows.row, credit.kind);
+      const previous = existing && existing.date === credit.date ? (Number(existing.amount) || 0) : 0;
+      writeActivityTotal(rows.rec, rows.row, credit.kind, current - previous + (Number(credit.amount) || 0));
+      byKey.set(key, {
+        kind: credit.kind,
+        id: credit.id,
+        date: credit.date,
+        amount: credit.amount,
+        mode: "add",
+        updatedAt: credit.updatedAt || null,
+      });
+      continue;
+    }
+    const rows = ensureActivityRows(days, history, credit.date);
+    const current = readActivityTotal(rows.rec, rows.row, "steps");
+    if ((Number(credit.amount) || 0) > current) writeActivityTotal(rows.rec, rows.row, "steps", credit.amount);
+    byKey.set(key, {
+      kind: "steps",
+      id: credit.id,
+      date: credit.date,
+      amount: credit.amount,
+      mode: "max",
+      updatedAt: credit.updatedAt || null,
+    });
+  }
+  for (const tomb of tombstones || []) {
+    if (!tomb || (tomb.collection !== "water" && tomb.collection !== "steps") || !tomb.id) continue;
+    const key = `${tomb.collection}:${tomb.id}`;
+    const existing = byKey.get(key);
+    if (!existing) continue;
+    if (!tombstoneWins([tomb], tomb.collection, tomb.id, existing.date, existing.updatedAt)) continue;
+    if (existing.kind === "water" || existing.mode === "add") {
+      const rows = ensureActivityRows(days, history, existing.date);
+      const current = readActivityTotal(rows.rec, rows.row, existing.kind);
+      writeActivityTotal(rows.rec, rows.row, existing.kind, current - (Number(existing.amount) || 0));
+    }
+    pushConflict(conflicts, {
+      at: now,
+      collection: tomb.collection,
+      identity: tomb.id,
+      date: existing.date,
+      resolution: "deleted",
+      reason: "deleted",
+      deletedAt: tomb.deletedAt,
+      dropped: clone(existing),
+    });
+    byKey.delete(key);
+  }
+  days.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  history.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return [...byKey.values()];
 }
 
 function requireDate(entry) {
@@ -798,6 +962,11 @@ export function documentFromInbox(inbox, now) {
       }
       continue;
     }
+    if (entry.type === "water" || entry.type === "steps") {
+      const credit = creditFromInbox(entry, stamp);
+      if (credit) doc.credits.push(credit);
+      continue;
+    }
     if (entry.type === "recipe") {
       if (!String(entry.name || "").trim() && !entry.id) continue;
       doc.recipes.push({
@@ -817,6 +986,21 @@ export function documentFromInbox(inbox, now) {
     }
   }
   return { document: doc, settings };
+}
+
+function creditFromInbox(entry, stamp) {
+  const date = dateKey(entry);
+  const id = entry.id ? String(entry.id) : "";
+  if (!date || !id) return null;
+  if (entry.type === "water") {
+    const amount = Number(entry.amount);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    return { kind: "water", id, date, amount, mode: "add", updatedAt: stamp };
+  }
+  const count = Number(entry.count != null ? entry.count : entry.amount);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  const mode = entry.mode === "add" ? "add" : "max";
+  return { kind: "steps", id, date, amount: count, mode, updatedAt: stamp };
 }
 
 function upsertInboxHistory(doc, date, patch) {
@@ -955,6 +1139,7 @@ export function dataSignature(doc) {
     days: source.days,
     today: source.today,
     deleted: source.deleted,
+    applied: source.applied,
     targets: source.targets,
     meta: source.meta,
     milestones: source.milestones,
