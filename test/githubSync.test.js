@@ -27,6 +27,8 @@ import {
   isBlockedRepo,
   registerMergeApplier,
   loadPreTwoWayBackup,
+  loadSyncReport,
+  summarizeInboxFiles,
   recordTombstone,
 } from "../src/githubSync.js";
 
@@ -163,6 +165,13 @@ function setup(token = "test-token-not-real") {
   saveSyncConfig({ token, repo: "nelzon-ai/macro-console-data", branch: "main" });
   registerPayloadGetter(() => samplePayload());
 }
+
+test("inbox summary counts food and water without settings", () => {
+  const summary = summarizeInboxFiles([{
+    body: JSON.stringify({ entries: [{ type: "food" }, { type: "food" }, { type: "water" }, { type: "settings" }] }),
+  }]);
+  assert.equal(summary, "2 food, 1 water");
+});
 
 test("refuses a public repo and never uploads", async () => {
   setup();
@@ -552,6 +561,9 @@ test("the same additive inbox file cannot apply twice when upload fails and the 
 
   const first = await syncNow();
   assert.equal(first.ok, false);
+  assert.equal(loadSyncReport().ok, false);
+  assert.equal(loadSyncReport().problem, "Upload failed");
+  assert.equal(loadSyncReport().imported, "1 water, 1 steps");
   assert.equal(state.water, 650);
   assert.equal(state.steps, 1400);
   const second = await syncNow();

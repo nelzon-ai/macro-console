@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
 // Bump when shipping a new service worker so installed phones drop the old cache.
-const SW_CACHE_VERSION = "v7";
+const SW_CACHE_VERSION = "v8";
 
 export default defineConfig({
   base: "./", // works on GitHub Pages under /repo-name/ without extra config

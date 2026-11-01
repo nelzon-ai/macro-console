@@ -27,6 +27,7 @@ export const INBOX_PROCESSED_DIR = "data/inbox/processed/";
 export const PUBLIC_APP_REPO = "nelzon-ai/macro-console";
 export const DEFAULT_DEBOUNCE_MS = 2000;
 export const PRE_TWO_WAY_BACKUP_KEY = "macroConsole.sync.preTwoWayBackup";
+export const SYNC_REPORT_KEY = "macroConsole.ui.syncReport";
 
 const KEYS = {
   token: "macroConsole.sync.token",
@@ -158,6 +159,78 @@ export function loadSyncStatus() {
   } catch {
     return empty;
   }
+}
+
+const INBOX_LABELS = {
+  food: "food",
+  water: "water",
+  steps: "steps",
+  workout: "workout",
+  weighIn: "weigh-in",
+  measurement: "measurement",
+  bodyComp: "body comp",
+  recipe: "recipe",
+  delete: "delete",
+};
+
+export function summarizeInboxFiles(files) {
+  const counts = new Map();
+  for (const file of files || []) {
+    let parsed = file && file.body;
+    if (typeof parsed === "string") {
+      try { parsed = JSON.parse(parsed); } catch { continue; }
+    }
+    const entries = parsed && Array.isArray(parsed.entries) ? parsed.entries : [];
+    for (const entry of entries) {
+      if (!entry || typeof entry !== "object" || !entry.type || entry.type === "settings") continue;
+      const label = INBOX_LABELS[entry.type] || String(entry.type);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+  }
+  const preferred = ["food", "water", "steps", "workout", "weigh-in", "measurement", "body comp", "recipe", "delete"];
+  const parts = [];
+  for (const label of preferred) {
+    if (counts.has(label)) parts.push(`${counts.get(label)} ${label}`);
+  }
+  for (const [label, count] of counts) {
+    if (!preferred.includes(label)) parts.push(`${count} ${label}`);
+  }
+  return parts.join(", ");
+}
+
+export function loadSyncReport() {
+  const raw = readKey(SYNC_REPORT_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return {
+      at: parsed.at || null,
+      ok: !!parsed.ok,
+      partial: !!parsed.partial,
+      problem: parsed.problem || "",
+      imported: parsed.imported || "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveSyncReport(report) {
+  writeKey(SYNC_REPORT_KEY, JSON.stringify({
+    at: report.at || clock().toISOString(),
+    ok: !!report.ok,
+    partial: !!report.partial,
+    problem: report.problem || "",
+    imported: report.imported || "",
+  }));
+}
+
+function syncProblem(err) {
+  const code = err && err.code;
+  if (code === "network" || code === "conflict" || code === "offline") return "Upload failed";
+  const message = String((err && err.message) || "Sync failed");
+  return message.length > 80 ? `${message.slice(0, 77)}...` : message;
 }
 
 export function subscribeSyncStatus(fn) {
@@ -680,6 +753,7 @@ async function putHistoryIfMissing(cfg, text) {
 }
 
 async function markInboxProcessed(cfg, files) {
+  let stuck = 0;
   for (const file of files) {
     try {
       let body = file.body || "{}\n";
@@ -699,8 +773,11 @@ async function markInboxProcessed(cfg, files) {
         const fresh = await getFileSha(cfg, path);
         if (fresh) await deleteInboxFile(cfg, path, fresh);
       }
-    } catch { /* the credit id is already recorded, so a stuck inbox file cannot be added again */ }
+    } catch {
+      stuck += 1;
+    }
   }
+  return { stuck };
 }
 
 async function finishSynced(prev, message) {
@@ -725,12 +802,14 @@ async function uploadOneWay(cfg, localText) {
     saveApplied(saved.applied || []);
     saveLastMerged(saved);
   } catch { /* the upload already succeeded; a bad local parse must not fail the sync */ }
+  saveSyncReport({ ok: true, partial: false, problem: "", imported: "" });
   return finishSynced(null, "Synced to your private repo.");
 }
 
 async function runSyncBody() {
   const cfg = loadSyncConfig();
   const prev = loadSyncStatus();
+  let inboxAccepted = [];
   if (!cfg.token) {
     return { ok: false, skipped: true, message: "Add a token in Settings → Sync to turn sync on." };
   }
@@ -803,6 +882,8 @@ async function runSyncBody() {
     // and add the same id again on the next sync.
     const ledgerSaved = saveApplied(built.document.applied || []);
     if (!ledgerSaved) {
+      inboxAccepted = built.accepted || [];
+      saveSyncReport({ ok: false, partial: false, problem: "Sync failed", imported: summarizeInboxFiles(inboxAccepted) });
       const status = emit({
         state: "error",
         pending: false,
@@ -823,6 +904,7 @@ async function runSyncBody() {
     let sha = remote.sha || null;
     let document = built.document;
     let accepted = built.accepted;
+    inboxAccepted = accepted;
     for (let attempt = 0; attempt < 3; attempt++) {
       const text = exportText(document, cfg.token);
       try {
@@ -835,20 +917,33 @@ async function runSyncBody() {
         built = composeMerge(localDoc, fresh.doc, inboxFiles, clock().toISOString());
         document = built.document;
         accepted = built.accepted;
+        inboxAccepted = accepted;
         sha = fresh.sha;
         saveApplied(document.applied || []);
         await apply(document, built.settingsPatch);
       }
     }
     await putHistoryIfMissing(cfg, exportText(document, cfg.token));
-    try {
-      await markInboxProcessed(cfg, accepted);
-    } catch { /* next sync imports the same file again; ids keep that from duplicating */ }
+    const moved = await markInboxProcessed(cfg, accepted);
+    const imported = summarizeInboxFiles(accepted);
+    const partial = moved.stuck > 0;
+    saveSyncReport({
+      ok: !partial,
+      partial,
+      problem: partial ? "Inbox file not moved" : "",
+      imported,
+    });
     saveTombstones(document.deleted || []);
     saveApplied(document.applied || []);
     saveLastMerged(document);
-    return finishSynced(prev, "Synced. This phone and the private repo now share one merged backup.");
+    return finishSynced(prev, partial ? "Synced, but an inbox file could not be moved." : "Synced. This phone and the private repo now share one merged backup.");
   } catch (err) {
+    saveSyncReport({
+      ok: false,
+      partial: false,
+      problem: syncProblem(err),
+      imported: summarizeInboxFiles(inboxAccepted),
+    });
     const code = err.code || "network";
     const retry = code === "network" || code === "conflict" || code === "offline";
     const status = emit({
