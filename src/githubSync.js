@@ -84,7 +84,22 @@ export function resetSyncState() {
   fetchImpl = (...args) => globalThis.fetch(...args);
   clock = () => new Date();
   debounceMs = DEFAULT_DEBOUNCE_MS;
+  conflictDelayMs = defaultConflictDelay();
   listeners.clear();
+}
+
+function defaultConflictDelay() {
+  return typeof window === "undefined" ? 0 : 200;
+}
+
+let conflictDelayMs = defaultConflictDelay();
+
+export function setSyncConflictDelay(ms) { conflictDelayMs = ms; }
+
+function waitForGitHub(attempt) {
+  const ms = conflictDelayMs * attempt;
+  if (!ms) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function store() {
@@ -219,7 +234,18 @@ export function loadSyncReport() {
   }
 }
 
-function saveSyncReport(report) {
+export function shouldReplaceSyncReport(prev, next, startedAtMs) {
+  if (!next) return true;
+  if (next.ok && !next.partial) return true;
+  if (!prev || !prev.ok || prev.partial) return true;
+  const prevAt = Date.parse(prev.at || "");
+  if (!Number.isFinite(prevAt) || !Number.isFinite(startedAtMs)) return true;
+  return prevAt < startedAtMs;
+}
+
+function saveSyncReport(report, startedAtMs) {
+  const prev = loadSyncReport();
+  if (!shouldReplaceSyncReport(prev, report, startedAtMs)) return;
   writeKey(SYNC_REPORT_KEY, JSON.stringify({
     at: report.at || clock().toISOString(),
     ok: !!report.ok,
@@ -229,9 +255,10 @@ function saveSyncReport(report) {
   }));
 }
 
-function syncProblem(err) {
+function stepProblem(step, err) {
+  const named = (err && err.step) || step || "Sync";
   const code = err && err.code;
-  if (code === "network" || code === "conflict" || code === "offline") return "Upload failed";
+  if (code === "network" || code === "conflict" || code === "offline") return `${named} failed`;
   const message = String((err && err.message) || "Sync failed");
   return message.length > 80 ? `${message.slice(0, 77)}...` : message;
 }
@@ -481,7 +508,7 @@ function ghHeaders(token) {
   };
 }
 
-async function github(path, { method = "GET", token, query, body } = {}) {
+async function githubOnce(path, { method = "GET", token, query, body } = {}) {
   const url = new URL(API + path);
   if (query) {
     Object.entries(query).forEach(([key, value]) => {
@@ -511,6 +538,28 @@ async function github(path, { method = "GET", token, query, body } = {}) {
     try { data = JSON.parse(text); } catch { data = { message: text.slice(0, 180) }; }
   }
   return { ok: res.ok, status: res.status, data };
+}
+
+async function github(path, options = {}) {
+  const method = options.method || "GET";
+  const attempts = method === "GET" ? 4 : 1;
+  let last = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    last = await githubOnce(path, options);
+    const busy = method === "GET" && last && (last.status === 409 || last.status === 422);
+    if (!busy || attempt === attempts) return last;
+    await waitForGitHub(attempt);
+  }
+  return last;
+}
+
+function sameUploadedPayload(left, right) {
+  const copy = (doc) => {
+    const payload = payloadForUpload(doc);
+    delete payload.exportedAt;
+    return payload;
+  };
+  return JSON.stringify(copy(left)) === JSON.stringify(copy(right));
 }
 
 function friendlyMessage(code, raw) {
@@ -627,6 +676,7 @@ async function putFile(cfg, path, text, message, options = {}) {
     if (last.ok) return { skipped: false };
     if ((last.status === 409 || last.status === 422) && options.singleAttempt) throw httpError(last);
     if (last.status === 409 || last.status === 422) {
+      await waitForGitHub(attempt + 1);
       const fresh = await getFileSha(cfg, path);
       if (createOnly && fresh) return { skipped: true };
       if (fresh && fresh !== sha) {
@@ -836,7 +886,12 @@ async function finishSynced(prev, message) {
 async function uploadOneWay(cfg, localText) {
   try { await ensureRemoteSnapshot(cfg, localText); } catch { /* a failed snapshot must not block the old upload path */ }
   await putFile(cfg, LATEST_PATH, localText, "Sync latest Macro Console data");
-  await putHistoryIfMissing(cfg, localText);
+  try {
+    await putHistoryIfMissing(cfg, localText);
+  } catch (err) {
+    err.step = "Daily snapshot";
+    throw err;
+  }
   await maybeWeeklyBackup(cfg, localText);
   try {
     const saved = JSON.parse(localText);
@@ -849,9 +904,11 @@ async function uploadOneWay(cfg, localText) {
 }
 
 async function runSyncBody() {
+  const startedAtMs = clock().getTime();
   const cfg = loadSyncConfig();
   const prev = loadSyncStatus();
   let inboxAccepted = [];
+  let step = "Latest upload";
   if (!cfg.token) {
     return { ok: false, skipped: true, message: "Add a token in Settings → Sync to turn sync on." };
   }
@@ -904,19 +961,22 @@ async function runSyncBody() {
     try {
       remote = await readContentFile(cfg, LATEST_PATH);
     } catch {
-      return uploadOneWay(cfg, localText);
+      return await uploadOneWay(cfg, localText);
     }
-    if (remote.unparsed) return uploadOneWay(cfg, localText);
+    if (remote.unparsed) return await uploadOneWay(cfg, localText);
 
     let inboxFiles = [];
     try {
+      step = "Inbox read";
       inboxFiles = await loadInboxFiles(cfg);
     } catch (err) {
       if (!remote.missing) throw err;
-      return uploadOneWay(cfg, localText);
+      step = "Latest upload";
+      return await uploadOneWay(cfg, localText);
     }
+    step = "Latest upload";
 
-    if (remote.missing && inboxFiles.length === 0) return uploadOneWay(cfg, localText);
+    if (remote.missing && inboxFiles.length === 0) return await uploadOneWay(cfg, localText);
 
     let built = composeMerge(localDoc, remote.missing ? {} : remote.doc, inboxFiles, now);
     // Record credit ids before the phone totals change and before any upload.
@@ -925,7 +985,7 @@ async function runSyncBody() {
     const ledgerSaved = saveApplied(built.document.applied || []);
     if (!ledgerSaved) {
       inboxAccepted = built.accepted || [];
-      saveSyncReport({ ok: false, partial: false, problem: "Sync failed", imported: summarizeInboxFiles(inboxAccepted) });
+      saveSyncReport({ ok: false, partial: false, problem: "Sync failed", imported: summarizeInboxFiles(inboxAccepted) }, startedAtMs);
       const status = emit({
         state: "error",
         pending: false,
@@ -953,9 +1013,10 @@ async function runSyncBody() {
         await putFile(cfg, LATEST_PATH, text, "Sync latest Macro Console data", { knownSha: true, sha, singleAttempt: true });
         break;
       } catch (err) {
-        if (err.code !== "conflict" || attempt === 2) throw err;
+        if (err.code !== "conflict") throw err;
         const fresh = await readContentFile(cfg, LATEST_PATH);
-        if (fresh.unparsed || fresh.missing) throw err;
+        if (!fresh.unparsed && !fresh.missing && fresh.doc && sameUploadedPayload(document, fresh.doc)) break;
+        if (attempt === 2 || fresh.unparsed || fresh.missing) throw err;
         built = composeMerge(localDoc, fresh.doc, inboxFiles, clock().toISOString());
         document = built.document;
         accepted = built.accepted;
@@ -965,8 +1026,11 @@ async function runSyncBody() {
         await apply(document, built.settingsPatch);
       }
     }
+    step = "Daily snapshot";
     await putHistoryIfMissing(cfg, exportText(document, cfg.token));
+    step = "Weekly backup";
     await maybeWeeklyBackup(cfg, exportText(document, cfg.token));
+    step = "Inbox move";
     const moved = await markInboxProcessed(cfg, accepted);
     const imported = summarizeInboxFiles(accepted);
     const partial = moved.stuck > 0;
@@ -975,7 +1039,7 @@ async function runSyncBody() {
       partial,
       problem: partial ? "Inbox file not moved" : "",
       imported,
-    });
+    }, startedAtMs);
     saveTombstones(document.deleted || []);
     saveApplied(document.applied || []);
     saveLastMerged(document);
@@ -984,9 +1048,9 @@ async function runSyncBody() {
     saveSyncReport({
       ok: false,
       partial: false,
-      problem: syncProblem(err),
+      problem: stepProblem(step, err),
       imported: summarizeInboxFiles(inboxAccepted),
-    });
+    }, startedAtMs);
     const code = err.code || "network";
     const retry = code === "network" || code === "conflict" || code === "offline";
     const status = emit({
@@ -1090,6 +1154,7 @@ export async function testConnection() {
 export function installSyncRetries() {
   if (typeof window === "undefined") return () => {};
   const retryIfPending = () => {
+    if (running) return;
     if (loadSyncStatus().pending && isOnline()) void kick();
   };
   const onVisible = () => {

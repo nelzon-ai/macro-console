@@ -385,7 +385,7 @@ function describeSyncLine(report, status, weeklyBackupOn) {
     return { bad: true, text: withBackup(["Partial sync", report.problem || "Inbox file not moved", when, report.imported].filter(Boolean).join(" · ")) };
   }
   if (!report.ok) {
-    return { bad: true, text: withBackup(["Sync failed", report.problem || "Upload failed", report.imported].filter(Boolean).join(" · ")) };
+    return { bad: true, text: withBackup(["Sync failed", report.problem || "Sync failed", report.imported].filter(Boolean).join(" · ")) };
   }
   return { bad: false, text: withBackup([`Synced${when ? ` ${when}` : ""}`, report.imported].filter(Boolean).join(" · ")) };
 }
