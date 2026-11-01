@@ -11,6 +11,7 @@ import {
 import {
   DEFAULT_REPO, DEFAULT_BRANCH, loadSyncConfig, loadSyncStatus, saveSyncConfig, clearSyncToken,
   registerPayloadGetter, subscribeSyncStatus, scheduleSync, syncNow, testConnection, installSyncRetries,
+  registerMergeApplier, registerSafetyBackupHandler, recordTombstone, forgetTombstone, loadPreTwoWayBackup,
 } from "./githubSync.js";
 import {
   DEFAULT_TARGETS,
@@ -367,6 +368,23 @@ function shortDate(ds) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+function downloadJsonFile(filename, text) {
+  try {
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 function emptyDay() { return { foods: [], weight: null, water: 0, steps: null, workout: null, locked: false }; }
 function sumMacros(foods) {
   return foods.reduce((acc, f) => ({
@@ -393,15 +411,15 @@ function lastKnownWeight(history) {
 }
 function upsertHistory(history, summary) {
   const filtered = history.filter((h) => h.date !== summary.date);
-  return [...filtered, summary].sort((a, b) => a.date.localeCompare(b.date)).slice(-90);
+  return [...filtered, summary].sort((a, b) => a.date.localeCompare(b.date));
 }
 function upsertBodyComp(entries, entry) {
   const filtered = entries.filter((e) => e.date !== entry.date);
-  return [...filtered, entry].sort((a, b) => a.date.localeCompare(b.date)).slice(-90);
+  return [...filtered, entry].sort((a, b) => a.date.localeCompare(b.date));
 }
 function upsertMeasurements(entries, entry) {
   const filtered = entries.filter((e) => e.date !== entry.date);
-  return [...filtered, entry].sort((a, b) => a.date.localeCompare(b.date)).slice(-60);
+  return [...filtered, entry].sort((a, b) => a.date.localeCompare(b.date));
 }
 function upsertRecipe(recipes, recipe) {
   const filtered = recipes.filter((r) => r.name.toLowerCase() !== recipe.name.toLowerCase());
@@ -1065,6 +1083,10 @@ export default function MacroConsole() {
   const nextIndexRef = useRef(null);
   const logContextFromRef = useRef(0);
   const syncPayloadRef = useRef(null);
+  const dateStrRef = useRef(dateStr);
+  const daysRef = useRef([]);
+  const applyMergedRef = useRef(async () => {});
+  const safetyBackupRef = useRef(async () => false);
 
   function queueCloudSync() {
     scheduleSync();
@@ -1107,6 +1129,8 @@ export default function MacroConsole() {
 
   useEffect(() => {
     registerPayloadGetter(() => (syncPayloadRef.current ? syncPayloadRef.current() : null));
+    registerMergeApplier((merged, extra) => applyMergedRef.current(merged, extra));
+    registerSafetyBackupHandler((info) => safetyBackupRef.current(info));
     const unsubscribe = subscribeSyncStatus(setSyncStatus);
     const uninstallRetries = installSyncRetries();
     return () => {
@@ -1117,9 +1141,9 @@ export default function MacroConsole() {
 
   useEffect(() => {
     (async () => {
-      const [t, m, h, d, rc, bc, ms, pi, el, ef, nw, mileRaw, mealRaw, suppRaw, rulesRaw, daysRaw, weekRaw] = await Promise.all([
+      const [t, m, h, d, rc, bc, ms, pi, el, ef, nw, mileRaw, mealRaw, suppRaw, rulesRaw, daysRaw, weekRaw, syncDaysRaw] = await Promise.all([
         safeGet("targets"), safeGet("meta"), safeGet("history"), safeGet(`day:${todayStr()}`), safeGet("recipes"), safeGet("bodycomp"), safeGet("measurements"), safeGet("photoIndex"), safeGet("exerciseWeightLog"), safeGet("exerciseFeedback"), safeGet("nextWeightOverride"),
-        safeGet("milestones"), safeGet("mealTypes"), safeGet("supplementGroups"), safeGet("supplementRules"), safeGet("workoutDays"), safeGet("weeklyWorkoutTarget"),
+        safeGet("milestones"), safeGet("mealTypes"), safeGet("supplementGroups"), safeGet("supplementRules"), safeGet("workoutDays"), safeGet("weeklyWorkoutTarget"), safeGet("syncDays"),
       ]);
       // Saved values win. Missing keys stay as in-memory placeholders and are not written back,
       // so an update cannot overwrite food logs, targets, or sync settings already on the phone.
@@ -1175,6 +1199,14 @@ export default function MacroConsole() {
       setExerciseLog(loadedExerciseLog);
       setExerciseFeedback(loadedExerciseFeedback);
       setNextWeightOverride(loadedNextWeightOverride);
+      if (syncDaysRaw) {
+        try {
+          const parsedDays = JSON.parse(syncDaysRaw);
+          if (Array.isArray(parsedDays)) daysRef.current = parsedDays;
+        } catch (e) {}
+      }
+      const restDays = (daysRef.current || []).filter((rec) => rec && rec.date !== todayStr());
+      daysRef.current = [...restDays, { date: todayStr(), updatedAt: loadedDay.updatedAt || null, day: loadedDay }];
       // A day pre-logged in advance has no history entry yet — add it now that it's today.
       if (loadedDay.foods && loadedDay.foods.length > 0 && !loadedHistory.some((h) => h.date === todayStr())) {
         try {
@@ -1208,6 +1240,7 @@ export default function MacroConsole() {
 
   useEffect(() => { historyRef.current = history; }, [history]);
   useEffect(() => { metaRef.current = meta; }, [meta]);
+  useEffect(() => { dateStrRef.current = dateStr; }, [dateStr]);
 
   const selectedDayMode = (workoutDays.find((day) => day.key === workoutDayView) || {}).mode || "circuit";
   useEffect(() => {
@@ -1230,10 +1263,17 @@ export default function MacroConsole() {
       .finally(() => setPhotoLoadBusy(false));
   }, [photoAngleView, photoIndex]);
 
+  function rememberDay(date, day) {
+    if (!date || !day) return;
+    const rest = (daysRef.current || []).filter((rec) => rec && rec.date !== date);
+    daysRef.current = [...rest, { date, updatedAt: day.updatedAt || null, day }];
+  }
+
   async function loadDay(ds) {
     setDayLoading(true);
     const d = await safeGet(`day:${ds}`);
     const loaded = d ? JSON.parse(d) : emptyDay();
+    rememberDay(ds, loaded);
     setDayData(loaded);
     setDayLoading(false);
   }
@@ -1280,6 +1320,7 @@ export default function MacroConsole() {
   }
 
   async function writeDay(newDay, targetDate = dateStr) {
+    rememberDay(targetDate, newDay);
     await window.storage.set(`day:${targetDate}`, JSON.stringify(newDay), false);
     // Planned (future) days live only in their own day record — they stay out of
     // history, stats and streaks until the day actually arrives.
@@ -1464,6 +1505,7 @@ export default function MacroConsole() {
         return isBfPB;
       }
       day.weight = entry.weight;
+      rememberDay(todayStr(), day);
       await window.storage.set(`day:${todayStr()}`, JSON.stringify(day), false);
       await appendToHistory(todayStr(), day);
     } catch (e) {}
@@ -1607,6 +1649,7 @@ export default function MacroConsole() {
       const day = existing ? JSON.parse(existing) : emptyDay();
       if (day.locked) return;
       day.workout = { done: true, type: (day.workout && day.workout.type) || "Strength", duration: (day.workout && day.workout.duration) || "" };
+      rememberDay(todayStr(), day);
       await window.storage.set(`day:${todayStr()}`, JSON.stringify(day), false);
       await appendToHistory(todayStr(), day);
       if (!silent) showToast("Marked as trained today");
@@ -1942,10 +1985,15 @@ export default function MacroConsole() {
     const item = recipes.find((r) => r.id === id);
     if (!item) return;
     const newRecipes = recipes.filter((r) => r.id !== id);
+    const tomb = { collection: "recipes", id, name: item.name };
+    recordTombstone(tomb);
     setRecipes(newRecipes);
     showUndoToast(
       `Removed "${item.name}"`,
-      () => { setRecipes((cur) => upsertRecipeById(cur, item)); },
+      () => {
+        forgetTombstone(tomb);
+        setRecipes((cur) => upsertRecipeById(cur, item));
+      },
       async () => {
         try { await window.storage.set("recipes", JSON.stringify(newRecipes), false); } catch (e) {}
         queueCloudSync();
@@ -2064,10 +2112,13 @@ export default function MacroConsole() {
     const item = dayData.foods.find((f) => f.id === id);
     if (!item) return;
     const newDay = { ...dayData, foods: dayData.foods.filter((f) => f.id !== id) };
+    const tomb = { collection: "foods", id, date: dateStr };
+    recordTombstone(tomb);
     setDayData(newDay);
     showUndoToast(
       `Removed "${item.name}"`,
       () => {
+        forgetTombstone(tomb);
         const restoredDay = { ...newDay, foods: [...newDay.foods, item] };
         setDayData(restoredDay);
         persist(restoredDay);
@@ -2159,7 +2210,7 @@ export default function MacroConsole() {
     showToast("Targets updated");
   }
 
-  async function writePlanPatch(patch) {
+  async function writePlanPatch(patch, options = {}) {
     const writes = [];
     if (patch.targets) {
       setTargets(patch.targets);
@@ -2192,7 +2243,7 @@ export default function MacroConsole() {
       writes.push(window.storage.set("weeklyWorkoutTarget", JSON.stringify(patch.weeklyWorkoutTarget), false));
     }
     await Promise.allSettled(writes);
-    queueCloudSync();
+    if (options.sync !== false) queueCloudSync();
   }
 
   async function savePlanDraft(draft) {
@@ -2442,6 +2493,7 @@ export default function MacroConsole() {
             workout: summary.workoutDone ? { done: true, type: "Other", duration: 0 } : null,
             locked: true,
           };
+          rememberDay(h.date, dayPayload);
           writes.push(window.storage.set(`day:${h.date}`, JSON.stringify(dayPayload), false));
           if (h.date === dateStr) touchedCurrentDay = true;
         });
@@ -2464,6 +2516,7 @@ export default function MacroConsole() {
         restoredToday = parsed.today;
         const summary = buildSummary(parsed.today.date, parsed.today.day);
         newHistory = upsertHistory(newHistory, summary);
+        rememberDay(parsed.today.date, parsed.today.day);
         writes.push(window.storage.set(`day:${parsed.today.date}`, JSON.stringify(parsed.today.day), false));
         if (parsed.today.date === dateStr) touchedCurrentDay = true;
       }
@@ -2521,7 +2574,64 @@ export default function MacroConsole() {
       targets, meta, history, recipes, bodyComp, measurements,
       milestones, mealTypes, supplementGroups, supplementRules, workoutDays, weeklyWorkoutTarget,
       today: { date: dateStr, day: dayData },
+      days: daysRef.current || [],
     });
+  }
+
+  async function applyMergedBackup(merged, extra) {
+    const writes = [];
+    if (merged && Array.isArray(merged.history)) {
+      historyRef.current = merged.history;
+      setHistory(merged.history);
+      writes.push(window.storage.set("history", JSON.stringify(merged.history), false));
+    }
+    if (merged && Array.isArray(merged.recipes)) {
+      setRecipes(merged.recipes);
+      writes.push(window.storage.set("recipes", JSON.stringify(merged.recipes), false));
+    }
+    if (merged && Array.isArray(merged.bodyComp)) {
+      setBodyComp(merged.bodyComp);
+      writes.push(window.storage.set("bodycomp", JSON.stringify(merged.bodyComp), false));
+    }
+    if (merged && Array.isArray(merged.measurements)) {
+      setMeasurements(merged.measurements);
+      writes.push(window.storage.set("measurements", JSON.stringify(merged.measurements), false));
+    }
+    if (merged && Array.isArray(merged.days)) {
+      daysRef.current = merged.days.map((rec) => ({
+        date: rec.date,
+        updatedAt: rec.updatedAt || null,
+        day: rec.day,
+      }));
+      writes.push(window.storage.set("syncDays", JSON.stringify(daysRef.current), false));
+      merged.days.forEach((rec) => {
+        if (!rec || !rec.date || !rec.day) return;
+        writes.push(window.storage.set(`day:${rec.date}`, JSON.stringify(rec.day), false));
+      });
+      const viewed = merged.days.find((rec) => rec && rec.date === dateStrRef.current && rec.day);
+      if (viewed) setDayData(viewed.day);
+    }
+    if (extra && extra.settings && Object.keys(extra.settings).length) {
+      await writePlanPatch(extra.settings, { sync: false });
+    }
+    await Promise.allSettled(writes);
+  }
+
+  async function handleDownloadSafetyBackup() {
+    let text = loadPreTwoWayBackup();
+    if (!text) {
+      try {
+        const stored = await safeGet("preTwoWayBackup");
+        text = stored || "";
+      } catch (e) {
+        text = "";
+      }
+    }
+    if (!text) {
+      showToast("No safety backup yet. It is saved the first time sync runs.");
+      return;
+    }
+    if (!downloadJsonFile("macro-console-safety-backup.json", text)) setCopyModalText(text);
   }
 
   async function handleCopyBackup() {
@@ -2576,7 +2686,7 @@ export default function MacroConsole() {
       return;
     }
 
-    const merged = [...current, ...missing].sort((a, b) => a.date.localeCompare(b.date)).slice(-90);
+    const merged = [...current, ...missing].sort((a, b) => a.date.localeCompare(b.date));
     historyRef.current = merged;
     setHistory(merged);
     try {
@@ -2910,6 +3020,18 @@ export default function MacroConsole() {
   }
 
   syncPayloadRef.current = () => JSON.parse(buildFullBackup());
+  applyMergedRef.current = applyMergedBackup;
+  safetyBackupRef.current = async ({ text }) => {
+    let saved = false;
+    try {
+      const existing = await safeGet("preTwoWayBackup");
+      if (!existing) await window.storage.set("preTwoWayBackup", text, false);
+      saved = true;
+    } catch (e) {}
+    if (!downloadJsonFile("macro-console-safety-backup.json", text)) setCopyModalText(text);
+    showToast("Safety backup saved on this phone");
+    return saved;
+  };
 
   if (loading) {
     return (
@@ -4460,7 +4582,7 @@ export default function MacroConsole() {
                 <Label>Sync</Label>
               </div>
               <div className="font-mono mb-3" style={{ color: palette.textFaint, fontSize: 11, lineHeight: 1.45 }}>
-                Optional. Copies your backup to a private GitHub repo. The token stays on this phone only — it is never saved in the app. If you're offline, nothing here is lost and sync retries later.
+                Optional. Sync merges this phone with your private GitHub repo, then saves the combined backup. Entries added in the repo show up here. The token stays on this phone only. The first sync saves a full safety copy on this phone and in the private repo before anything is merged. If you're offline, nothing here is lost and sync retries later.
               </div>
               <div className="mb-2">
                 <div className="font-mono mb-1" style={{ color: palette.textFaint, fontSize: 10 }}>Token</div>
@@ -4530,6 +4652,7 @@ export default function MacroConsole() {
                 <Button onClick={handleSyncNow} full disabled={syncBusy !== ""}>
                   {syncBusy === "sync" ? "Syncing..." : "Sync now"}
                 </Button>
+                <Button onClick={handleDownloadSafetyBackup} variant="ghost" full>Download safety backup</Button>
               </div>
               {syncHasToken && (
                 <div className="mt-2">

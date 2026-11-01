@@ -16,6 +16,10 @@ Open it once while online so it can cache itself, then it works offline.
 ## Sync to a private repo (optional)
 Health data stays on the phone unless you turn sync on. The steps — private repo, a token that can only touch that repo, paste it into Settings → Sync — are in [SYNC.md](SYNC.md). The token is never stored in this repo.
 
+Sync is two-way. On each sync the phone reads `data/latest.json` and any new `data/inbox/*.json` files from the private repo, merges them with the copy on the phone, then writes the combined backup back. An entry added on either side is kept. The phone does not delete a row just because the other side omitted it. Removing a row takes an explicit delete entry, described in [docs/REMOTE_ENTRIES.md](docs/REMOTE_ENTRIES.md).
+
+Before the first sync on this version, the app saves a full safety copy on the phone and uploads `data/backups/<timestamp>.json` before it writes any merged file. Open the updated app once while online so it can refresh, then let it sync (or tap Sync now). Keep the downloaded safety file. Details and the safe update steps are in [SYNC.md](SYNC.md).
+
 Targets and the rest of the plan (milestones, meals, supplements, workout split) are edited in Settings and stored on the phone. The JSON shape for **Import settings** is in [SETTINGS.md](SETTINGS.md). Example values there are placeholders.
 
 ## Move your existing data over
