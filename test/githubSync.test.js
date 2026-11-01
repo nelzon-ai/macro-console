@@ -30,6 +30,8 @@ import {
   loadSyncReport,
   summarizeInboxFiles,
   recordTombstone,
+  weeklyBackupDue,
+  loadLastWeeklyBackupDate,
 } from "../src/githubSync.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -228,7 +230,8 @@ test("writes latest.json and today's snapshot, creating files when they are miss
   assert.equal(loadSyncStatus().pending, false);
   assert.equal(loadSyncStatus().lastSyncedAt, FIXED.toISOString());
   const puts = calls.filter((c) => c.method === "PUT");
-  assert.equal(puts.length, 3);
+  assert.equal(puts.length, 4);
+  assert.ok(puts.some((call) => call.url.endsWith("/contents/data/backups/weekly-2026-10-24.json")));
   assert.ok(puts[0].url.includes("/contents/data/backups/"));
   assert.ok(puts[0].url.endsWith(".json"));
   assert.ok(puts[1].url.endsWith("/contents/data/latest.json"));
@@ -240,7 +243,7 @@ test("writes latest.json and today's snapshot, creating files when they are miss
   const backup = JSON.parse(base64ToUtf8(puts[0].body.content));
   assert.equal(backup.today.day.weight, 174.4);
   assert.equal(JSON.stringify(backup).includes("test-token-not-real"), false);
-  assert.deepEqual(Object.keys(decoded), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts", "applied"]);
+  assert.deepEqual(Object.keys(decoded), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "workoutPlanBackups", "today", "days", "deleted", "conflicts", "applied"]);
   assert.equal(decoded.recipes[0].name, "Café oats");
   assert.equal(decoded.token, undefined);
   assert.equal(decoded.photo, undefined);
@@ -302,7 +305,7 @@ test("offline marks pending, does not call GitHub, and a later retry uploads", a
   const again = await syncNow();
   assert.equal(again.ok, true);
   assert.equal(loadSyncStatus().pending, false);
-  assert.equal(calls.filter((c) => c.method === "PUT").length, 3);
+  assert.equal(calls.filter((c) => c.method === "PUT").length, 4);
 });
 
 test("a network failure stays pending and does not throw", async () => {
@@ -322,7 +325,7 @@ test("debounced schedule collapses to one upload", async () => {
   scheduleSync();
   scheduleSync();
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(calls.filter((c) => c.method === "PUT").length, 3);
+  assert.equal(calls.filter((c) => c.method === "PUT").length, 4);
 });
 
 test("does nothing when no token is saved", async () => {
@@ -351,7 +354,9 @@ test("disconnect removes the token from storage", () => {
 
 test("payload keeps the export shape and drops anything else", () => {
   const payload = payloadForUpload(samplePayload());
-  assert.deepEqual(Object.keys(payload), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts", "applied"]);
+  assert.deepEqual(Object.keys(payload), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "workoutPlanBackups", "today", "days", "deleted", "conflicts", "applied"]);
+  assert.equal(payload.workoutDays[0].key, "dayA");
+  assert.deepEqual(payload.workoutPlanBackups, []);
   assert.equal(JSON.stringify(payload).includes("secret-photo"), false);
   assert.equal(JSON.stringify(payload).includes("should-never-upload"), false);
 });
@@ -576,6 +581,29 @@ test("the same additive inbox file cannot apply twice when upload fails and the 
   assert.equal(state.steps, 1400);
   assert.equal(state.calories, 100);
   assert.equal(state.foods, 1);
+});
+
+test("weekly backup is written at most once every 7 days and never deleted", async () => {
+  assert.equal(weeklyBackupDue("", "2026-10-24"), true);
+  assert.equal(weeklyBackupDue("2026-10-24", "2026-10-30"), false);
+  assert.equal(weeklyBackupDue("2026-10-24", "2026-10-31"), true);
+  setup();
+  const { calls } = installHappyFetch();
+  assert.equal((await syncNow()).ok, true);
+  const weekly = calls.filter((call) => call.method === "PUT" && call.url.includes("/data/backups/weekly-"));
+  assert.equal(weekly.length, 1);
+  assert.ok(weekly[0].url.endsWith("/contents/data/backups/weekly-2026-10-24.json"));
+  assert.equal(loadLastWeeklyBackupDate(), "2026-10-24");
+  calls.length = 0;
+  assert.equal((await syncNow()).ok, true);
+  assert.equal(calls.filter((call) => call.url.includes("/data/backups/weekly-")).length, 0);
+  assert.equal(calls.some((call) => call.method === "DELETE" && call.url.includes("data/backups/")), false);
+  setSyncClock(() => new Date(2026, 9, 31, 12, 0, 0));
+  calls.length = 0;
+  assert.equal((await syncNow()).ok, true);
+  assert.equal(calls.filter((call) => call.method === "PUT" && call.url.includes("weekly-2026-10-31.json")).length, 1);
+  assert.equal(loadLastWeeklyBackupDate(), "2026-10-31");
+  assert.equal(calls.some((call) => call.method === "DELETE"), false);
 });
 
 function walk(dir, out = []) {

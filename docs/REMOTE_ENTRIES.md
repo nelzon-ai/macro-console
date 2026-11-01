@@ -102,7 +102,7 @@ Set `"mode": "add"` only when `count` is an extra amount to add once, the same r
 
 ## Workout
 
-Marks that date as trained. This is the day's workout flag (`done`, a short label, and minutes). Per-set weights logged in the workout screen stay on the phone; they are not part of this file.
+Marks that date as trained. This is the day's workout flag (`done`, a short label, and minutes). It does not change the saved workout plan. Per-set weights logged in the workout screen stay on the phone; they are not part of this file.
 
 ```json
 {
@@ -214,6 +214,41 @@ The same object can be placed in `data/latest.json` under `deleted` instead of a
     "deletedAt": "2026-01-15T09:00:00.000Z"
   }
 ]
+```
+
+## Workout plan
+
+Replaces the saved plan on the phone: workout days, exercises, sets, reps, prescribed weight in pounds, and notes. Logged sets stay where they are. The plan that was on the phone is copied into `workoutPlanBackups` inside `data/latest.json` before the new one is saved. Importing the same plan again does not add another copy. The current plan is also stored on `workoutDays` in that same snapshot, so a plan saved on the phone is readable from the private repo after the next sync.
+
+`sets` is the sets and reps string, for example `4×8-12`. `startWeight` is the prescribed weight in pounds (`"20"`) or `"bodyweight"`. `notes` is optional on a day or an exercise. `weeklyWorkoutTarget` is optional; leave it out to keep the number already on the phone.
+
+```json
+{
+  "type": "workoutPlan",
+  "updatedAt": "2026-01-15T18:00:00.000Z",
+  "weeklyWorkoutTarget": 3,
+  "workoutDays": [
+    {
+      "key": "dayA",
+      "label": "Day A",
+      "sub": "Push",
+      "mode": "straight",
+      "notes": "Example day note",
+      "exercises": [
+        {
+          "icon": "floorpress",
+          "name": "Press",
+          "cue": "Press the weight up.",
+          "sets": "4×8-12",
+          "tag": "Chest",
+          "startWeight": "20",
+          "rest": 90,
+          "notes": "Example exercise note"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## Settings

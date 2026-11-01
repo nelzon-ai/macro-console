@@ -3,6 +3,8 @@
 // the entry. Conflicting edits keep the winner in the live log and the other
 // copy under `conflicts`, which is stored in the private repo.
 
+import { normalizeWeeklyTarget, normalizeWorkoutDays } from "./planSettings.js";
+
 const MACRO_KEYS = ["calories", "protein", "carbs", "fat", "fiber"];
 const HISTORY_FIELDS = [...MACRO_KEYS, "weight", "water", "steps", "workoutDone"];
 const MEASURE_KEYS = ["waist", "chest", "thigh", "arm", "neck", "hips"];
@@ -32,6 +34,7 @@ export function emptyDocument(partial = {}) {
     supplementRules: Array.isArray(source.supplementRules) ? clone(source.supplementRules) : [],
     workoutDays: Array.isArray(source.workoutDays) ? clone(source.workoutDays) : [],
     weeklyWorkoutTarget: source.weeklyWorkoutTarget != null ? source.weeklyWorkoutTarget : null,
+    workoutPlanBackups: Array.isArray(source.workoutPlanBackups) ? clone(source.workoutPlanBackups) : [],
     today: isObject(source.today) ? clone(source.today) : null,
     days: Array.isArray(source.days) ? clone(source.days) : [],
     deleted: Array.isArray(source.deleted) ? clone(source.deleted) : [],
@@ -690,6 +693,7 @@ export function mergeDocuments(localRaw, remoteRaw, options = {}) {
     supplementRules: clone(local.supplementRules),
     workoutDays: clone(local.workoutDays),
     weeklyWorkoutTarget: local.weeklyWorkoutTarget,
+    workoutPlanBackups: unionPlanBackups(local.workoutPlanBackups, remote.workoutPlanBackups),
     today,
     days,
     deleted,
@@ -877,7 +881,8 @@ function withStamp(entry, fallback) {
 export function documentFromInbox(inbox, now) {
   const doc = emptyDocument({ exportedAt: (inbox && inbox.createdAt) || now });
   const settings = {};
-  if (!isObject(inbox)) return { document: doc, settings };
+  let workoutPlan = null;
+  if (!isObject(inbox)) return { document: doc, settings, workoutPlan };
   if (isObject(inbox.settings)) Object.assign(settings, inbox.settings);
   const entries = Array.isArray(inbox.entries) ? inbox.entries : [];
   for (const entry of entries) {
@@ -989,6 +994,14 @@ export function documentFromInbox(inbox, now) {
       if (credit) doc.credits.push(credit);
       continue;
     }
+    if (entry.type === "workoutPlan") {
+      if (!Array.isArray(entry.workoutDays)) continue;
+      workoutPlan = {
+        workoutDays: clone(entry.workoutDays),
+        weeklyWorkoutTarget: Object.prototype.hasOwnProperty.call(entry, "weeklyWorkoutTarget") ? entry.weeklyWorkoutTarget : undefined,
+      };
+      continue;
+    }
     if (entry.type === "recipe") {
       if (!String(entry.name || "").trim() && !entry.id) continue;
       doc.recipes.push({
@@ -1007,7 +1020,51 @@ export function documentFromInbox(inbox, now) {
       });
     }
   }
-  return { document: doc, settings };
+  return { document: doc, settings, workoutPlan };
+}
+
+function unionPlanBackups(localList, remoteList) {
+  const out = [];
+  const seen = new Set();
+  for (const item of [...(Array.isArray(localList) ? localList : []), ...(Array.isArray(remoteList) ? remoteList : [])]) {
+    if (!item || typeof item !== "object" || !Array.isArray(item.workoutDays)) continue;
+    const savedAt = typeof item.savedAt === "string" ? item.savedAt : "";
+    const key = `${savedAt}|${stable(item.workoutDays)}|${item.weeklyWorkoutTarget == null ? "" : item.weeklyWorkoutTarget}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      savedAt,
+      workoutDays: clone(item.workoutDays),
+      weeklyWorkoutTarget: item.weeklyWorkoutTarget != null ? item.weeklyWorkoutTarget : null,
+    });
+  }
+  return out;
+}
+
+export function applyWorkoutPlanUpdate(doc, plan, now) {
+  const next = emptyDocument(doc);
+  if (!plan || !Array.isArray(plan.workoutDays)) return next;
+  const incomingDays = normalizeWorkoutDays(plan.workoutDays);
+  const currentDays = normalizeWorkoutDays(next.workoutDays);
+  const hasTarget = plan.weeklyWorkoutTarget != null && plan.weeklyWorkoutTarget !== "";
+  const incomingTarget = hasTarget ? normalizeWeeklyTarget(plan.weeklyWorkoutTarget) : next.weeklyWorkoutTarget;
+  const sameDays = stable(currentDays) === stable(incomingDays);
+  const sameTarget = incomingTarget === next.weeklyWorkoutTarget;
+  if (!(sameDays && sameTarget)) {
+    const worthKeeping = currentDays.some((day) => day.exercises && day.exercises.length) || next.weeklyWorkoutTarget != null;
+    if (worthKeeping) {
+      const snapshot = {
+        savedAt: now,
+        workoutDays: clone(currentDays),
+        weeklyWorkoutTarget: next.weeklyWorkoutTarget,
+      };
+      const already = (next.workoutPlanBackups || []).some((item) => stable(item.workoutDays) === stable(snapshot.workoutDays) && item.weeklyWorkoutTarget === snapshot.weeklyWorkoutTarget);
+      if (!already) next.workoutPlanBackups = [...(next.workoutPlanBackups || []), snapshot];
+    }
+  }
+  next.workoutDays = incomingDays;
+  if (hasTarget) next.weeklyWorkoutTarget = incomingTarget;
+  return next;
 }
 
 function creditFromInbox(entry, stamp) {
@@ -1078,6 +1135,7 @@ export function mergeWithInbox(local, remote, inboxFiles, now) {
   const accepted = [];
   const skipped = [];
   let settings = {};
+  let workoutPlan = null;
   const files = [...(inboxFiles || [])].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
   for (const file of files) {
     let parsed;
@@ -1093,9 +1151,11 @@ export function mergeWithInbox(local, remote, inboxFiles, now) {
     if (built.settings && Object.keys(built.settings).length) {
       settings = { ...settings, ...built.settings };
     }
+    if (built.workoutPlan) workoutPlan = built.workoutPlan;
     accepted.push(file);
   }
-  return { document, settings, accepted, skipped };
+  if (workoutPlan) document = applyWorkoutPlanUpdate(document, workoutPlan, now);
+  return { document, settings, workoutPlan, accepted, skipped };
 }
 
 function stripUpdatedAt(value) {
@@ -1170,5 +1230,6 @@ export function dataSignature(doc) {
     supplementRules: source.supplementRules,
     workoutDays: source.workoutDays,
     weeklyWorkoutTarget: source.weeklyWorkoutTarget,
+    workoutPlanBackups: source.workoutPlanBackups,
   });
 }
