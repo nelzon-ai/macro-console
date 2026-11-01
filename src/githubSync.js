@@ -296,7 +296,7 @@ function loadApplied() {
 }
 
 function saveApplied(list) {
-  writeKey(KEYS.applied, JSON.stringify(list || []));
+  return writeKey(KEYS.applied, JSON.stringify(list || []));
 }
 
 function dedupeApplied(list) {
@@ -642,8 +642,15 @@ async function loadInboxFiles(cfg) {
   return loaded;
 }
 
+function withSavedLedger(doc) {
+  const next = emptyDocument(doc);
+  next.applied = dedupeApplied([...(next.applied || []), ...loadApplied()]);
+  next.credits = Array.isArray(doc && doc.credits) ? doc.credits : [];
+  return next;
+}
+
 function composeMerge(localDoc, remoteDoc, inboxFiles, now) {
-  const built = mergeWithInbox(localDoc, remoteDoc || {}, inboxFiles, now);
+  const built = mergeWithInbox(withSavedLedger(localDoc), remoteDoc || {}, inboxFiles, now);
   let document = built.document;
   const settingsPatch = planPatchFromObject(built.settings);
   if (Object.keys(settingsPatch).length) document = applySettingsOntoDocument(document, settingsPatch);
@@ -674,15 +681,25 @@ async function putHistoryIfMissing(cfg, text) {
 
 async function markInboxProcessed(cfg, files) {
   for (const file of files) {
-    let body = file.body || "{}\n";
     try {
-      const parsed = JSON.parse(body);
-      parsed.processedAt = clock().toISOString();
-      body = `${JSON.stringify(parsed, null, 2)}\n`;
-    } catch { /* leave the original text */ }
-    const name = file.name;
-    await putFile(cfg, `${INBOX_PROCESSED_DIR}${name}`, body, "Mark Macro Console inbox file processed");
-    if (file.sha) await deleteInboxFile(cfg, file.path || `${INBOX_DIR}${name}`, file.sha);
+      let body = file.body || "{}\n";
+      try {
+        const parsed = JSON.parse(body);
+        parsed.processedAt = clock().toISOString();
+        body = `${JSON.stringify(parsed, null, 2)}\n`;
+      } catch { /* leave the original text */ }
+      const name = file.name;
+      await putFile(cfg, `${INBOX_PROCESSED_DIR}${name}`, body, "Mark Macro Console inbox file processed");
+      if (!file.sha) continue;
+      const path = file.path || `${INBOX_DIR}${name}`;
+      try {
+        await deleteInboxFile(cfg, path, file.sha);
+      } catch (err) {
+        if (err.code !== "conflict") throw err;
+        const fresh = await getFileSha(cfg, path);
+        if (fresh) await deleteInboxFile(cfg, path, fresh);
+      }
+    } catch { /* the credit id is already recorded, so a stuck inbox file cannot be added again */ }
   }
 }
 
@@ -781,6 +798,20 @@ async function runSyncBody() {
     if (remote.missing && inboxFiles.length === 0) return uploadOneWay(cfg, localText);
 
     let built = composeMerge(localDoc, remote.missing ? {} : remote.doc, inboxFiles, now);
+    // Record credit ids before the phone totals change and before any upload.
+    // A failed upload used to skip this write, leave the inbox file in place,
+    // and add the same id again on the next sync.
+    const ledgerSaved = saveApplied(built.document.applied || []);
+    if (!ledgerSaved) {
+      const status = emit({
+        state: "error",
+        pending: false,
+        code: "backup",
+        message: "Couldn't save which inbox entries were counted, so this phone's logs were left as they are.",
+        lastSyncedAt: prev.lastSyncedAt,
+      });
+      return { ok: false, message: status.message };
+    }
     await ensureRemoteSnapshot(cfg, localText);
     const apply = async (document, settingsPatch) => {
       if (!mergeApplier) return;
@@ -805,6 +836,7 @@ async function runSyncBody() {
         document = built.document;
         accepted = built.accepted;
         sha = fresh.sha;
+        saveApplied(document.applied || []);
         await apply(document, built.settingsPatch);
       }
     }

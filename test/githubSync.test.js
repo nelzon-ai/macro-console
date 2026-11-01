@@ -487,6 +487,85 @@ test("a tombstone removes a recipe from the merge without dropping it from confl
   assert.equal(decoded.conflicts.some((item) => item.collection === "recipes" && item.reason === "deleted"), true);
 });
 
+test("the same additive inbox file cannot apply twice when upload fails and the file stays", async () => {
+  setup();
+  const state = { water: 400, steps: 1000, calories: 100, foods: 1 };
+  const dayBody = () => ({
+    foods: [{ id: "food-1", name: "Example oats", calories: 100, protein: 1, carbs: 2, fat: 1, fiber: 1 }],
+    weight: null,
+    water: state.water,
+    steps: state.steps,
+    workout: null,
+    locked: false,
+  });
+  registerPayloadGetter(() => ({
+    ...samplePayload(),
+    history: [{ date: "2026-01-08", calories: 100, protein: 1, carbs: 2, fat: 1, fiber: 1, weight: null, water: state.water, steps: state.steps, workoutDone: false }],
+    today: { date: "2026-01-08", day: dayBody() },
+    days: [{ date: "2026-01-08", day: dayBody() }],
+  }));
+  registerMergeApplier(async (doc) => {
+    const row = doc.history.find((item) => item.date === "2026-01-08");
+    const day = doc.days.find((item) => item.date === "2026-01-08");
+    state.water = row.water;
+    state.steps = row.steps;
+    state.calories = row.calories;
+    state.foods = day.day.foods.length;
+  });
+  const inboxBody = JSON.stringify({
+    id: "batch-activity",
+    createdAt: "2026-01-08T12:00:00.000Z",
+    entries: [
+      { type: "water", date: "2026-01-08", id: "water-example-1", updatedAt: "2026-01-08T12:00:00.000Z", amount: 250 },
+      { type: "steps", date: "2026-01-08", id: "steps-example-1", updatedAt: "2026-01-08T12:00:00.000Z", count: 400, mode: "add" },
+    ],
+  });
+  let latestPuts = 0;
+  setSyncFetch(async (url, init = {}) => {
+    const method = init.method || "GET";
+    const u = String(url);
+    if (/\/repos\/[^/]+\/[^/]+$/.test(u.replace("https://api.github.com", ""))) {
+      return json(200, { private: true, visibility: "private", default_branch: "main" });
+    }
+    if (u.includes("/branches/")) return json(200, { name: "main" });
+    if (u.includes("/contents/") && method === "GET") {
+      const path = decodeURIComponent(u.split("/contents/")[1].split("?")[0]);
+      if (path === "data/inbox") {
+        return json(200, [{ name: "activity.json", path: "data/inbox/activity.json", type: "file", sha: "in1" }]);
+      }
+      if (path === "data/inbox/activity.json") {
+        return json(200, { sha: "in1", type: "file", content: utf8ToBase64(inboxBody) });
+      }
+      return json(404, { message: "Not Found" });
+    }
+    if (u.includes("/contents/") && method === "PUT") {
+      const path = decodeURIComponent(u.split("/contents/")[1].split("?")[0]);
+      if (path === LATEST_PATH) {
+        latestPuts += 1;
+        if (latestPuts < 3) return json(500, { message: "unavailable" });
+      }
+      return json(201, { content: { sha: "sha-ok" } });
+    }
+    if (method === "DELETE") return json(500, { message: "still there" });
+    return json(500, { message: `unexpected ${method} ${u}` });
+  });
+
+  const first = await syncNow();
+  assert.equal(first.ok, false);
+  assert.equal(state.water, 650);
+  assert.equal(state.steps, 1400);
+  const second = await syncNow();
+  assert.equal(second.ok, false);
+  assert.equal(state.water, 650);
+  assert.equal(state.steps, 1400);
+  assert.equal(await syncNow().then((result) => result.ok), true);
+  assert.equal(await syncNow().then((result) => result.ok), true);
+  assert.equal(state.water, 650);
+  assert.equal(state.steps, 1400);
+  assert.equal(state.calories, 100);
+  assert.equal(state.foods, 1);
+});
+
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
     if (name === "node_modules" || name === ".git" || name === "dist") continue;

@@ -68,7 +68,7 @@ Sets the weight, in pounds, on that date. It does not replace other numbers on t
 
 Adds millilitres to the total already stored for that date. It does not replace the day's water. The phone stores that total as `water` on the day and on the matching history row. A glass logged on the phone and a water entry from the inbox are added together.
 
-`id` is required. The same id is counted once. Importing the file again, or sending the same id later, does not add the amount a second time. A newer `updatedAt` with a different `amount` replaces that id's contribution and leaves every other millilitre on the day alone.
+`id` is required. The same id is counted once, including when the file stays in `data/inbox/` because moving it to `processed/` failed, and including when a sync is interrupted after the phone has saved the new total. A newer `updatedAt` with a different `amount` replaces that id's contribution and leaves every other millilitre on the day alone.
 
 ```json
 {
