@@ -375,3 +375,73 @@ test("stampLocalChanges marks an edit and leaves untouched rows alone", () => {
   assert.equal(stamped.history[0].updatedAt, NOW);
   assert.equal(stamped.days[0].day.foods[0].updatedAt, NOW);
 });
+
+test("workoutPlan replaces the saved plan, keeps the previous one, and does not touch logs", () => {
+  const previous = [{
+    key: "dayA",
+    label: "Day A",
+    sub: "",
+    mode: "straight",
+    exercises: [{ icon: "floorpress", name: "Press", cue: "", sets: "3×8-12", tag: "Chest", startWeight: "20", rest: 90 }],
+  }];
+  const logs = [{ exercise: "Press", weight: 20, reps: 8, setNumber: 1, date: "2026-01-08" }];
+  const local = base({ workoutDays: previous, weeklyWorkoutTarget: 3, workoutPlanBackups: [] });
+  const remote = base({
+    workoutDays: [],
+    workoutPlanBackups: [{ savedAt: "2026-01-01T00:00:00.000Z", workoutDays: previous, weeklyWorkoutTarget: 2 }],
+  });
+  const file = {
+    name: "plan.json",
+    body: JSON.stringify({
+      entries: [{
+        type: "workoutPlan",
+        updatedAt: NOW,
+        weeklyWorkoutTarget: 4,
+        workoutDays: [{
+          key: "dayA",
+          label: "Day A",
+          sub: "Push",
+          mode: "straight",
+          notes: "Example day note",
+          exercises: [{
+            icon: "floorpress",
+            name: "Press",
+            cue: "Press up.",
+            sets: "4×8-12",
+            startWeight: "25",
+            rest: 90,
+            notes: "Example exercise note",
+          }],
+        }],
+      }],
+    }),
+  };
+  const once = mergeWithInbox(local, remote, [file], NOW);
+  assert.equal(once.document.workoutDays[0].exercises[0].startWeight, "25");
+  assert.equal(once.document.workoutDays[0].exercises[0].sets, "4×8-12");
+  assert.equal(once.document.workoutDays[0].exercises[0].notes, "Example exercise note");
+  assert.equal(once.document.workoutDays[0].notes, "Example day note");
+  assert.equal(once.document.weeklyWorkoutTarget, 4);
+  assert.equal(once.document.workoutPlanBackups.length, 2);
+  const fresh = once.document.workoutPlanBackups.find((item) => item.savedAt === NOW);
+  assert.equal(fresh.workoutDays[0].exercises[0].startWeight, "20");
+  assert.equal(fresh.workoutDays[0].exercises[0].sets, "3×8-12");
+  assert.equal(once.document.exerciseWeightLog, undefined);
+  const twice = mergeWithInbox(once.document, once.document, [file], LATER);
+  assert.equal(twice.document.workoutPlanBackups.length, 2);
+  assert.equal(twice.document.workoutDays[0].exercises[0].startWeight, "25");
+  assert.equal(JSON.stringify(logs), JSON.stringify([{ exercise: "Press", weight: 20, reps: 8, setNumber: 1, date: "2026-01-08" }]));
+});
+
+test("an empty local backup list does not drop remote workout plan backups", () => {
+  const remote = base({
+    workoutPlanBackups: [{
+      savedAt: "2026-01-01T00:00:00.000Z",
+      workoutDays: [{ key: "dayA", label: "Day A", sub: "", mode: "circuit", exercises: [] }],
+      weeklyWorkoutTarget: 3,
+    }],
+  });
+  const merged = mergeDocuments(base({ workoutPlanBackups: [] }), remote, { now: NOW }).document;
+  assert.equal(merged.workoutPlanBackups.length, 1);
+  assert.equal(merged.workoutPlanBackups[0].savedAt, "2026-01-01T00:00:00.000Z");
+});

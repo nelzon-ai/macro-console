@@ -13,7 +13,17 @@ import {
   registerPayloadGetter, subscribeSyncStatus, scheduleSync, syncNow, testConnection, installSyncRetries,
   registerMergeApplier, registerSafetyBackupHandler, recordTombstone, forgetTombstone, loadPreTwoWayBackup,
   loadSyncReport,
+  loadLastWeeklyBackupDate,
 } from "./githubSync.js";
+import {
+  parseSetsCount,
+  parseRepRange,
+  planWeightLb,
+  buildSessionQueue,
+  displaySetNumber,
+  setsLoggedToday,
+} from "./workoutSession.js";
+import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -158,14 +168,6 @@ const WORKOUT_POSES = {
     hold: `<circle cx="16" cy="50" r="7" fill="var(--amber)" stroke="none" /><line x1="24" y1="50" x2="82" y2="50" /><line x1="30" y1="50" x2="30" y2="64" /><line x1="82" y1="50" x2="92" y2="58" />`,
   },
 };
-
-const DUMBBELL_SETTINGS = [6, 9, 12, 15, 18, 21, 24];
-function nextDumbbellSetting(current) {
-  for (let i = 0; i < DUMBBELL_SETTINGS.length; i++) {
-    if (DUMBBELL_SETTINGS[i] > current) return DUMBBELL_SETTINGS[i];
-  }
-  return null;
-}
 
 const WORKOUT_TAG_STYLES = {
   Chest: { background: "rgba(193,112,79,0.18)", color: "#D98868" },
@@ -369,21 +371,23 @@ function shortDate(ds) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
-function describeSyncLine(report, status) {
-  if (status && status.state === "syncing") return { bad: false, text: "Syncing…" };
+function describeSyncLine(report, status, weeklyBackupOn) {
+  const backup = weeklyBackupOn ? `Weekly backup ${shortDate(weeklyBackupOn)}` : "";
+  const withBackup = (text) => [text, backup].filter(Boolean).join(" · ");
+  if (status && status.state === "syncing") return { bad: false, text: withBackup("Syncing…") };
   if (!report) {
-    if (status && status.pending) return { bad: true, text: "Sync waiting to retry" };
-    if (status && status.lastSyncedAt) return { bad: status.state === "error", text: `Last sync ${formatSyncTime(status.lastSyncedAt)}` };
-    return null;
+    if (status && status.pending) return { bad: true, text: withBackup("Sync waiting to retry") };
+    if (status && status.lastSyncedAt) return { bad: status.state === "error", text: withBackup(`Last sync ${formatSyncTime(status.lastSyncedAt)}`) };
+    return backup ? { bad: false, text: backup } : null;
   }
   const when = formatSyncTime(report.at || (status && status.lastSyncedAt));
   if (report.partial) {
-    return { bad: true, text: ["Partial sync", report.problem || "Inbox file not moved", when, report.imported].filter(Boolean).join(" · ") };
+    return { bad: true, text: withBackup(["Partial sync", report.problem || "Inbox file not moved", when, report.imported].filter(Boolean).join(" · ")) };
   }
   if (!report.ok) {
-    return { bad: true, text: ["Sync failed", report.problem || "Upload failed", report.imported].filter(Boolean).join(" · ") };
+    return { bad: true, text: withBackup(["Sync failed", report.problem || "Upload failed", report.imported].filter(Boolean).join(" · ")) };
   }
-  return { bad: false, text: [`Synced${when ? ` ${when}` : ""}`, report.imported].filter(Boolean).join(" · ") };
+  return { bad: false, text: withBackup([`Synced${when ? ` ${when}` : ""}`, report.imported].filter(Boolean).join(" · ")) };
 }
 function formatMeasure(value) {
   if (!Number.isFinite(value)) return "—";
@@ -956,29 +960,17 @@ function ExerciseIcon({ icon, frame }) {
   );
 }
 
-function parseSetsCount(setsStr) {
-  const match = String(setsStr || "").match(/^(\d+)×/);
-  return match ? Number(match[1]) : 1;
-}
-function parseRepRange(setsStr) {
-  const match = String(setsStr || "").match(/×\s*(\d+)-(\d+)/);
-  return match ? { lo: Number(match[1]), hi: Number(match[2]) } : null;
-}
-function topOfRepRange(setsStr) {
-  const range = parseRepRange(setsStr);
-  return range ? range.hi : null;
-}
-
-function ExerciseLogCard({ ex, dayKey, lastLog, onLog, onMarkDone }) {
-  const [weight, setWeight] = useState(lastLog && lastLog.weight != null ? String(lastLog.weight) : "");
-  const [reps, setReps] = useState(lastLog && lastLog.reps != null ? String(lastLog.reps) : "");
+function ExerciseLogCard({ ex, dayKey, lastLog, setsDone, onLog, onMarkDone }) {
+  const planned = planWeightLb(ex);
+  const [weight, setWeight] = useState(planned != null ? String(planned) : "");
+  const [reps, setReps] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const bodyweight = ex.startWeight === "bodyweight";
   const tagStyle = WORKOUT_TAG_STYLES[ex.tag] || {};
   const isHold = !!(WORKOUT_POSES[ex.icon] && WORKOUT_POSES[ex.icon].hold);
   const fd = FORM_DETAILS[ex.name];
-  const repCeiling = topOfRepRange(ex.sets);
-  const atCeiling = repCeiling != null && lastLog && lastLog.reps != null && lastLog.reps >= repCeiling;
+  const totalSets = parseSetsCount(ex.sets);
+  const shownSet = setsDone >= totalSets ? totalSets : (Number(setsDone) || 0) + 1;
   return (
     <div className="rounded-lg p-3 mb-2" style={{ background: palette.panelAlt, border: `1px solid ${palette.border}` }}>
       {isHold ? (
@@ -1021,23 +1013,15 @@ function ExerciseLogCard({ ex, dayKey, lastLog, onLog, onMarkDone }) {
       )}
       <div className="flex items-center justify-between mb-2">
         <span className="font-mono" style={{ color: palette.amber, fontSize: 13, fontWeight: 600 }}>
-          {ex.sets}{ex.per ? <span style={{ color: palette.textFaint, fontSize: 10 }}> {ex.per}</span> : null}
+          Set {shownSet} of {totalSets}{setsDone >= totalSets ? " logged" : ""}{ex.per ? <span style={{ color: palette.textFaint, fontSize: 10 }}> {ex.per}</span> : null}
         </span>
-        <span className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>start: {ex.startWeight}</span>
+        <span className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>Plan {ex.sets} · {ex.startWeight || "—"}</span>
       </div>
-      {atCeiling && (
-        <div className="flex items-center gap-1 mb-2 rounded-lg px-2 py-1.5" style={{ background: "rgba(147,172,121,0.12)" }}>
-          <TrendingUp size={12} style={{ color: palette.olive, flexShrink: 0 }} />
-          <span className="font-mono" style={{ color: palette.olive, fontSize: 10.5 }}>
-            Hit {lastLog.reps} reps last time — top of range, worth adding weight next session.
-          </span>
-        </div>
-      )}
       {!bodyweight && (
         <div className="flex items-center gap-2 pt-2" style={{ borderTop: `1px solid ${palette.border}` }}>
           <input
             type="number" inputMode="decimal" value={weight} onChange={(e) => setWeight(e.target.value)}
-            placeholder={ex.startWeight.split(" ")[0]}
+            placeholder={planned != null ? String(planned) : "lb"}
             className="font-mono rounded-lg px-2 py-1.5 text-sm outline-none border"
             style={{ width: 56, background: palette.panel, borderColor: palette.border, color: palette.text }}
           />
@@ -1080,6 +1064,7 @@ export default function MacroConsole() {
   const [supplementGroups, setSupplementGroups] = useState(DEFAULT_SUPPLEMENT_GROUPS);
   const [supplementRules, setSupplementRules] = useState(DEFAULT_SUPPLEMENT_RULES);
   const [workoutDays, setWorkoutDays] = useState(DEFAULT_WORKOUT_DAYS);
+  const [workoutPlanBackups, setWorkoutPlanBackups] = useState([]);
   const [weeklyWorkoutTarget, setWeeklyWorkoutTarget] = useState(DEFAULT_WEEKLY_WORKOUT_TARGET);
   const [meta, setMeta] = useState({ streak: 0, lastLoggedDate: null });
   const [history, setHistory] = useState([]);
@@ -1168,6 +1153,11 @@ export default function MacroConsole() {
   const [syncHasToken, setSyncHasToken] = useState(() => loadSyncConfig().hasToken);
   const [syncStatus, setSyncStatus] = useState(() => loadSyncStatus());
   const [syncReport, setSyncReport] = useState(() => loadSyncReport());
+  const [weeklyBackupOn, setWeeklyBackupOn] = useState(() => loadLastWeeklyBackupDate());
+  const [proteinDismissedOn, setProteinDismissedOn] = useState(() => {
+    try { return localStorage.getItem(PROTEIN_NUDGE_DISMISSED_KEY) || ""; } catch (e) { return ""; }
+  });
+  const [clockTick, setClockTick] = useState(0);
   const [syncBusy, setSyncBusy] = useState("");
   const [undoAction, setUndoAction] = useState(null);
   const toastTimer = useRef(null);
@@ -1176,6 +1166,9 @@ export default function MacroConsole() {
   const patchDayDebounce = useRef(null);
   const restIntervalRef = useRef(null);
   const nextIndexRef = useRef(null);
+  const sessionIndexRef = useRef(0);
+  const sessionQueueRef = useRef([]);
+  const sessionModeTouched = useRef(false);
   const logContextFromRef = useRef(0);
   const syncPayloadRef = useRef(null);
   const dateStrRef = useRef(dateStr);
@@ -1229,6 +1222,7 @@ export default function MacroConsole() {
     const unsubscribe = subscribeSyncStatus((status) => {
       setSyncStatus(status);
       setSyncReport(loadSyncReport());
+      setWeeklyBackupOn(loadLastWeeklyBackupDate());
     });
     const uninstallRetries = installSyncRetries();
     return () => {
@@ -1238,10 +1232,22 @@ export default function MacroConsole() {
   }, []);
 
   useEffect(() => {
+    const id = setInterval(() => setClockTick((n) => n + 1), 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    if (sessionModeTouched.current || sessionActive) return;
+    const day = workoutDays.find((item) => item.key === workoutDayView) || workoutDays[0];
+    if (!day) return;
+    setSessionMode(day.mode === "straight" ? "straight" : "circuit");
+  }, [workoutDays, workoutDayView, sessionActive]);
+
+  useEffect(() => {
     (async () => {
-      const [t, m, h, d, rc, bc, ms, pi, el, ef, nw, mileRaw, mealRaw, suppRaw, rulesRaw, daysRaw, weekRaw, syncDaysRaw] = await Promise.all([
+      const [t, m, h, d, rc, bc, ms, pi, el, ef, nw, mileRaw, mealRaw, suppRaw, rulesRaw, daysRaw, weekRaw, syncDaysRaw, planBackupsRaw] = await Promise.all([
         safeGet("targets"), safeGet("meta"), safeGet("history"), safeGet(`day:${todayStr()}`), safeGet("recipes"), safeGet("bodycomp"), safeGet("measurements"), safeGet("photoIndex"), safeGet("exerciseWeightLog"), safeGet("exerciseFeedback"), safeGet("nextWeightOverride"),
-        safeGet("milestones"), safeGet("mealTypes"), safeGet("supplementGroups"), safeGet("supplementRules"), safeGet("workoutDays"), safeGet("weeklyWorkoutTarget"), safeGet("syncDays"),
+        safeGet("milestones"), safeGet("mealTypes"), safeGet("supplementGroups"), safeGet("supplementRules"), safeGet("workoutDays"), safeGet("weeklyWorkoutTarget"), safeGet("syncDays"), safeGet("workoutPlanBackups"),
       ]);
       // Saved values win. Missing keys stay as in-memory placeholders and are not written back,
       // so an update cannot overwrite food logs, targets, or sync settings already on the phone.
@@ -1274,6 +1280,8 @@ export default function MacroConsole() {
       const loadedDays = parsedDays === undefined ? DEFAULT_WORKOUT_DAYS : normalizeWorkoutDays(parsedDays);
       const parsedWeek = readJson(weekRaw);
       const loadedWeek = parsedWeek === undefined ? DEFAULT_WEEKLY_WORKOUT_TARGET : normalizeWeeklyTarget(parsedWeek);
+      const parsedPlanBackups = readJson(planBackupsRaw);
+      const loadedPlanBackups = Array.isArray(parsedPlanBackups) ? parsedPlanBackups : [];
       try {
         const st = await safeGet("suppTicks");
         if (st) { const parsed = JSON.parse(st); if (parsed.date === todayStr()) setSuppTicks(parsed); }
@@ -1285,6 +1293,7 @@ export default function MacroConsole() {
       setSupplementGroups(loadedGroups);
       setSupplementRules(loadedRules);
       setWorkoutDays(loadedDays);
+      setWorkoutPlanBackups(loadedPlanBackups);
       setWeeklyWorkoutTarget(loadedWeek);
       setWorkoutDayView((cur) => (loadedDays.some((day) => day.key === cur) ? cur : (loadedDays[0] ? loadedDays[0].key : "dayA")));
       setMeta(loadedMeta);
@@ -1764,65 +1773,46 @@ export default function MacroConsole() {
     } catch (e) {}
   }
 
-  function suggestedWeight(ex) {
-    if (ex.startWeight === "bodyweight") return null;
-    if (nextWeightOverride[ex.name] != null) return nextWeightOverride[ex.name];
-    const last = lastLogForExercise(ex.name, parseSetsCount(ex.sets));
-    if (!last || last.weight == null) return null;
-    const range = parseRepRange(ex.sets);
-    if (range && last.reps != null && last.reps >= range.hi) {
-      const next = nextDumbbellSetting(last.weight);
-      return next != null ? next : last.weight;
+  function loggedTodayByExercise(day) {
+    const counts = {};
+    const today = todayStr();
+    for (const ex of (day && day.exercises) || []) {
+      if (!ex || !ex.name) continue;
+      counts[ex.name] = setsLoggedToday(exerciseLog, ex.name, today);
     }
-    return last.weight;
-  }
-
-  function buildSessionQueue(day, mode) {
-    if (mode === "circuit") {
-      const queue = [];
-      const maxRounds = Math.max(...day.exercises.map((ex) => parseSetsCount(ex.sets)));
-      for (let round = 1; round <= maxRounds; round++) {
-        day.exercises.forEach((ex) => {
-          const setsCount = parseSetsCount(ex.sets);
-          if (round <= setsCount) {
-            queue.push({ ex, dayKey: day.key, setNumber: round, totalSets: setsCount });
-          }
-        });
-      }
-      return queue;
-    }
-    const queue = [];
-    day.exercises.forEach((ex) => {
-      const setsCount = parseSetsCount(ex.sets);
-      for (let i = 1; i <= setsCount; i++) {
-        queue.push({ ex, dayKey: day.key, setNumber: i, totalSets: setsCount });
-      }
-    });
-    return queue;
+    return counts;
   }
 
   function primeStepInputs(step) {
-    const sw = suggestedWeight(step.ex);
-    setSessionWeight(sw != null ? String(sw) : "");
-    const range = parseRepRange(step.ex.sets);
-    setSessionReps(range ? String(range.hi) : "");
+    const planned = planWeightLb(step.ex);
+    setSessionWeight(planned != null ? String(planned) : "");
+    setSessionReps("");
   }
 
   function startSession(day) {
-    const queue = buildSessionQueue(day, sessionMode);
-    if (queue.length === 0) return;
+    const queue = buildSessionQueue(day, sessionMode, loggedTodayByExercise(day));
+    if (queue.length === 0) {
+      showToast("All planned sets are already logged today");
+      return;
+    }
+    sessionQueueRef.current = queue;
+    sessionIndexRef.current = 0;
+    nextIndexRef.current = null;
     setSessionQueue(queue);
     setSessionIndex(0);
     setSessionPhase("logging");
     setWeightDecisions({});
     primeStepInputs(queue[0]);
     setSessionActive(true);
-    speak(`Starting today's workout. First up: ${queue[0].ex.name}, set 1 of ${queue[0].totalSets}.`);
+    speak(`Starting today's workout. First up: ${queue[0].ex.name}, set ${queue[0].setNumber} of ${queue[0].totalSets}.`);
   }
 
   function endSession() {
     if (restIntervalRef.current) { clearInterval(restIntervalRef.current); restIntervalRef.current = null; }
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    sessionQueueRef.current = [];
+    sessionIndexRef.current = 0;
+    nextIndexRef.current = null;
     setSessionActive(false);
     setSessionPhase("logging");
     setSessionQueue([]);
@@ -1834,17 +1824,19 @@ export default function MacroConsole() {
   function goToNextSet() {
     if (restIntervalRef.current) { clearInterval(restIntervalRef.current); restIntervalRef.current = null; }
     const nextIndex = nextIndexRef.current;
-    if (nextIndex == null) return;
-    const prevStep = sessionQueue[sessionIndex];
-    const nextStep = sessionQueue[nextIndex];
+    nextIndexRef.current = null;
+    if (nextIndex == null || sessionIndexRef.current === nextIndex) return;
+    const queue = sessionQueueRef.current;
+    const nextStep = queue[nextIndex];
+    if (!nextStep) return;
+    const prevStep = queue[sessionIndexRef.current];
+    sessionIndexRef.current = nextIndex;
     setSessionIndex(nextIndex);
     setSessionPhase("logging");
     primeStepInputs(nextStep);
-    if (prevStep && prevStep.ex.name === nextStep.ex.name) {
-      speak(`Next set. Set ${nextStep.setNumber} of ${nextStep.totalSets}.`);
-    } else {
-      speak(`Next: ${nextStep.ex.name}. Set 1 of ${nextStep.totalSets}.`);
-    }
+    const label = `Set ${nextStep.setNumber} of ${nextStep.totalSets}`;
+    if (prevStep && prevStep.ex.name === nextStep.ex.name) speak(`Next set. ${label}.`);
+    else speak(`Next: ${nextStep.ex.name}. ${label}.`);
   }
 
   function enterDebrief() {
@@ -1877,37 +1869,15 @@ export default function MacroConsole() {
   }
 
   function computeRecommendation(name, ex) {
-    const last = lastLogForExercise(name, parseSetsCount(ex.sets));
-    const range = parseRepRange(ex.sets);
     const answer = debriefAnswers[name];
-    const feedback = answer ? answer.feedback : null;
     const discomfort = answer ? !!answer.discomfort : false;
-
+    const planned = ex.startWeight && ex.startWeight !== "bodyweight" ? ex.startWeight : "";
     if (discomfort) {
-      const stayWeight = last && last.weight != null ? last.weight : null;
-      const base = ex.startWeight === "bodyweight" ? "Ease off this one" : (stayWeight != null ? `Stay at ${stayWeight}lb` : "Take it easy here");
-      return { text: `${base} — you flagged discomfort. Worth mentioning to a doctor or physio if it keeps happening.`, tone: "warn", weight: stayWeight };
+      const base = planned ? `Saved plan stays at ${planned}` : "Ease off this one";
+      return { text: `${base}. You flagged discomfort — worth mentioning to a doctor or physio if it keeps happening.`, tone: "warn", weight: null };
     }
-    if (ex.startWeight === "bodyweight") {
-      return { text: feedback === "hard" ? "Felt tough — that's fine for bodyweight work, keep at it." : "Keep going as is.", tone: "neutral", weight: null };
-    }
-    if (!last || last.weight == null) return { text: "Not enough data yet to suggest a change.", tone: "neutral", weight: null };
-    const hitCeiling = !!(range && last.reps != null && last.reps >= range.hi);
-
-    if (hitCeiling && feedback !== "hard") {
-      const next = nextDumbbellSetting(last.weight);
-      if (next == null) {
-        return { text: `You're at your top dumbbell setting (${last.weight}lb) and still hitting the top of your range — try adding a resistance band for extra tension, or it's time to pick up heavier weights.`, tone: "up", weight: null };
-      }
-      return { text: `Move up to ${next}lb next time — you hit the top of your range${feedback === "easy" ? " and it felt easy" : ""}.`, tone: "up", weight: next };
-    }
-    if (hitCeiling && feedback === "hard") {
-      return { text: `Stay at ${last.weight}lb one more session — you hit the range but it felt tough.`, tone: "neutral", weight: last.weight };
-    }
-    if (feedback === "hard") {
-      return { text: `Stay at ${last.weight}lb — that felt hard and you're not yet at the top of your rep range.`, tone: "neutral", weight: last.weight };
-    }
-    return { text: `Stay at ${last.weight}lb — still building up toward the top of your rep range.`, tone: "neutral", weight: last.weight };
+    if (planned) return { text: `Logged. The saved plan stays at ${planned}.`, tone: "neutral", weight: null };
+    return { text: "Logged. The saved plan is unchanged.", tone: "neutral", weight: null };
   }
 
   async function acceptRecommendation(name, weight) {
@@ -1928,9 +1898,11 @@ export default function MacroConsole() {
   }
 
   function advanceSession() {
-    const step = sessionQueue[sessionIndex];
-    const nextIndex = sessionIndex + 1;
-    if (nextIndex >= sessionQueue.length) {
+    const queue = sessionQueueRef.current;
+    const index = sessionIndexRef.current;
+    const step = queue[index];
+    const nextIndex = index + 1;
+    if (nextIndex >= queue.length) {
       speak("Workout complete. Quick check-in before you go.");
       enterDebrief();
       return;
@@ -1957,7 +1929,7 @@ export default function MacroConsole() {
   }
 
   async function logSessionSet() {
-    const step = sessionQueue[sessionIndex];
+    const step = sessionQueueRef.current[sessionIndexRef.current];
     if (!step) return;
     const isBodyweight = step.ex.startWeight === "bodyweight";
     const reps = sessionReps ? Number(sessionReps) : null;
@@ -1996,12 +1968,6 @@ export default function MacroConsole() {
       showToast(isPR ? `New PR — ${name}! ${weight}lb${repsSuffix}` : `Logged ${weight}lb${repsSuffix} — ${name}`);
     } catch (e) {
       showToast("Logged in session — storage still failing");
-    }
-    if (nextWeightOverride[name] != null) {
-      const newOverrides = { ...nextWeightOverride };
-      delete newOverrides[name];
-      setNextWeightOverride(newOverrides);
-      try { await window.storage.set("nextWeightOverride", JSON.stringify(newOverrides), false); } catch (e) {}
     }
     await markTrainedToday(true);
     return entry;
@@ -2673,7 +2639,7 @@ export default function MacroConsole() {
     return JSON.stringify({
       exportedAt: new Date().toISOString(),
       targets, meta, history, recipes, bodyComp, measurements,
-      milestones, mealTypes, supplementGroups, supplementRules, workoutDays, weeklyWorkoutTarget,
+      milestones, mealTypes, supplementGroups, supplementRules, workoutDays, weeklyWorkoutTarget, workoutPlanBackups,
       today: { date: dateStr, day: dayData },
       days: daysRef.current || [],
     });
@@ -2711,6 +2677,10 @@ export default function MacroConsole() {
       });
       const viewed = merged.days.find((rec) => rec && rec.date === dateStrRef.current && rec.day);
       if (viewed) setDayData(viewed.day);
+    }
+    if (merged && Array.isArray(merged.workoutPlanBackups)) {
+      setWorkoutPlanBackups(merged.workoutPlanBackups);
+      writes.push(window.storage.set("workoutPlanBackups", JSON.stringify(merged.workoutPlanBackups), false));
     }
     if (extra && extra.settings && Object.keys(extra.settings).length) {
       await writePlanPatch(extra.settings, { sync: false });
@@ -2953,6 +2923,22 @@ export default function MacroConsole() {
   }
 
   const totals = sumMacros(dayData.foods);
+  const todayProtein = dateStr === todayStr()
+    ? totals.protein
+    : Number((history.find((row) => row.date === todayStr()) || {}).protein) || 0;
+  const eveningNudge = proteinNudge({
+    protein: todayProtein,
+    target: targets.protein,
+    hour: clockTick >= 0 ? new Date().getHours() : 0,
+    dismissedOn: proteinDismissedOn,
+    today: todayStr(),
+    recipes,
+  });
+  function dismissProteinNudge() {
+    const today = todayStr();
+    setProteinDismissedOn(today);
+    try { localStorage.setItem(PROTEIN_NUDGE_DISMISSED_KEY, today); } catch (e) {}
+  }
   const isToday = dateStr === todayStr();
   const isFuture = dateStr > todayStr();
   const atMaxDate = dateStr >= addDays(todayStr(), 7);
@@ -3240,7 +3226,7 @@ export default function MacroConsole() {
         </div>
 
         {(() => {
-          const syncLine = describeSyncLine(syncReport, syncStatus);
+          const syncLine = describeSyncLine(syncReport, syncStatus, weeklyBackupOn);
           if (!syncLine) return null;
           return (
             <div
@@ -3258,6 +3244,24 @@ export default function MacroConsole() {
             </div>
           );
         })()}
+
+        {eveningNudge && (
+          <div
+            role="status"
+            className="font-mono mb-3 rounded-lg px-3 py-2"
+            style={{ fontSize: 12, lineHeight: 1.4, color: palette.text, background: palette.panel, border: `1px solid ${palette.amber}` }}
+          >
+            <div className="flex items-start justify-between gap-2">
+              <span>{eveningNudge.left}g protein left today</span>
+              <button type="button" onClick={dismissProteinNudge} className="font-display uppercase" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.04em" }}>Dismiss</button>
+            </div>
+            {eveningNudge.ideas.length > 0 && (
+              <div style={{ color: palette.textMuted, marginTop: 4 }}>
+                {eveningNudge.ideas.map((idea) => `${idea.name} · ${idea.protein}g`).join("  ·  ")}
+              </div>
+            )}
+          </div>
+        )}
 
         {view === "console" && (
         <>
@@ -4534,9 +4538,9 @@ export default function MacroConsole() {
                 ) : sessionPhase === "resting" ? (
                   (() => {
                     const nextStep = sessionQueue[nextIndexRef.current];
-                    const nextWeight = nextStep ? suggestedWeight(nextStep.ex) : null;
+                    const nextWeight = nextStep ? planWeightLb(nextStep.ex) : null;
                     const nextIsBodyweight = nextStep && nextStep.ex.startWeight === "bodyweight";
-                    const nextRange = nextStep ? parseRepRange(nextStep.ex.sets) : null;
+                    const nextLogged = nextStep ? setsLoggedToday(exerciseLog, nextStep.ex.name, todayStr()) : 0;
                     return (
                       <div className="text-center py-6">
                         <div className="font-mono" style={{ color: palette.textFaint, fontSize: 11, marginBottom: 8 }}>RESTING</div>
@@ -4551,10 +4555,10 @@ export default function MacroConsole() {
                               <div className="font-mono uppercase" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.06em" }}>Next up</div>
                               <div className="text-sm font-semibold truncate" style={{ color: palette.text }}>{nextStep.ex.name}</div>
                               <div className="font-mono" style={{ color: palette.amber, fontSize: 13 }}>
-                                {nextIsBodyweight ? "Bodyweight" : nextWeight != null ? `${nextWeight}lb` : "First time — pick a weight"}
-                                {nextRange ? ` · ${nextRange.hi} reps` : ""}
+                                {nextIsBodyweight ? "Bodyweight" : nextWeight != null ? `Plan ${nextWeight}lb` : "Plan weight not set"}
+                                {nextStep.ex.sets ? ` · ${nextStep.ex.sets}` : ""}
                               </div>
-                              <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>Set {nextStep.setNumber} of {nextStep.totalSets}{nextStep.ex.per ? ` ${nextStep.ex.per}` : ""}</div>
+                              <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>Set {displaySetNumber(nextStep, nextLogged)} of {nextStep.totalSets}{nextStep.ex.per ? ` ${nextStep.ex.per}` : ""}</div>
                             </div>
                           </div>
                         )}
@@ -4571,7 +4575,8 @@ export default function MacroConsole() {
                     </div>
                     <div className="text-center mb-1">
                       <div className="text-lg font-semibold" style={{ color: palette.text }}>{step.ex.name}</div>
-                      <div className="font-mono" style={{ color: palette.amber, fontSize: 13 }}>Set {step.setNumber} of {step.totalSets}{step.ex.per ? ` ${step.ex.per}` : ""}</div>
+                      <div className="font-mono" style={{ color: palette.amber, fontSize: 13 }}>Set {displaySetNumber(step, setsLoggedToday(exerciseLog, step.ex.name, todayStr()))} of {step.totalSets}{step.ex.per ? ` ${step.ex.per}` : ""}</div>
+                      <div className="font-mono mt-1" style={{ color: palette.textMuted, fontSize: 12 }}>Plan {step.ex.startWeight || "—"} · {step.ex.sets}</div>
                       <div className="font-mono mt-1" style={{ color: palette.textFaint, fontSize: 11 }}>{step.ex.cue}</div>
                     </div>
 
@@ -4601,6 +4606,7 @@ export default function MacroConsole() {
                       <div className="text-center" style={{ minWidth: 76 }}>
                         <input
                           type="number" inputMode="numeric" value={sessionReps} onChange={(e) => setSessionReps(e.target.value)}
+                          placeholder={(() => { const range = parseRepRange(step.ex.sets); return range ? `${range.lo}-${range.hi}` : "reps"; })()}
                           className="font-mono font-bold text-center"
                           style={{ width: 76, fontSize: 26, background: "transparent", border: "none", color: palette.text, outline: "none" }}
                         />
@@ -4650,8 +4656,8 @@ export default function MacroConsole() {
                     ))}
                   </div>
                   <div className="flex gap-1 mb-2">
-                    <Button onClick={() => setSessionMode("circuit")} variant={sessionMode === "circuit" ? "primary" : "ghost"} size="sm" grow>Circuit</Button>
-                    <Button onClick={() => setSessionMode("straight")} variant={sessionMode === "straight" ? "primary" : "ghost"} size="sm" grow>Straight sets</Button>
+                    <Button onClick={() => { sessionModeTouched.current = true; setSessionMode("circuit"); }} variant={sessionMode === "circuit" ? "primary" : "ghost"} size="sm" grow>Circuit</Button>
+                    <Button onClick={() => { sessionModeTouched.current = true; setSessionMode("straight"); }} variant={sessionMode === "straight" ? "primary" : "ghost"} size="sm" grow>Straight sets</Button>
                   </div>
                   <div className="font-mono mb-3" style={{ color: palette.textFaint, fontSize: 10 }}>
                     {sessionMode === "circuit"
@@ -4671,8 +4677,16 @@ export default function MacroConsole() {
                       {voiceEnabled ? <Volume2 size={16} style={{ color: "#1B1815" }} /> : <VolumeX size={16} style={{ color: palette.textFaint }} />}
                     </button>
                   </div>
-                  {day.exercises.map((ex) => (
-                    <ExerciseLogCard key={ex.name} ex={ex} dayKey={day.key} lastLog={lastLogForExercise(ex.name, parseSetsCount(ex.sets))} onLog={logExerciseWeight} onMarkDone={markTrainedToday} />
+                  {day.exercises.map((ex, index) => (
+                    <ExerciseLogCard
+                      key={`${day.key}-${index}-${ex.name}-${ex.startWeight}-${ex.sets}`}
+                      ex={ex}
+                      dayKey={day.key}
+                      setsDone={setsLoggedToday(exerciseLog, ex.name, todayStr())}
+                      lastLog={lastLogForExercise(ex.name, parseSetsCount(ex.sets))}
+                      onLog={logExerciseWeight}
+                      onMarkDone={markTrainedToday}
+                    />
                   ))}
                   <div className="font-mono mt-2 mb-1" style={{ color: palette.textFaint, fontSize: 10 }}>
                     Full two-frame form diagrams and detailed coaching cues live in your Workout Guide — this tab is for quick logging.
@@ -4908,6 +4922,9 @@ export default function MacroConsole() {
                   Last synced {formatSyncTime(syncStatus.lastSyncedAt)}{syncStatus.pending ? " · waiting to retry" : ""}
                 </div>
               )}
+              <div className="font-mono mb-3" style={{ color: palette.textFaint, fontSize: 11 }}>
+                {weeklyBackupOn ? `Weekly backup ${shortDate(weeklyBackupOn)}` : "No weekly backup yet"}
+              </div>
               <div className="space-y-2">
                 <Button onClick={handleTestSync} variant="ghost" full disabled={syncBusy !== ""}>
                   {syncBusy === "test" ? "Testing..." : "Test connection"}

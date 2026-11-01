@@ -28,6 +28,7 @@ export const PUBLIC_APP_REPO = "nelzon-ai/macro-console";
 export const DEFAULT_DEBOUNCE_MS = 2000;
 export const PRE_TWO_WAY_BACKUP_KEY = "macroConsole.sync.preTwoWayBackup";
 export const SYNC_REPORT_KEY = "macroConsole.ui.syncReport";
+export const LAST_WEEKLY_BACKUP_KEY = "macroConsole.ui.lastWeeklyBackup";
 
 const KEYS = {
   token: "macroConsole.sync.token",
@@ -39,6 +40,7 @@ const KEYS = {
   tombstones: "macroConsole.sync.tombstones",
   applied: "macroConsole.sync.appliedCredits",
   lastMerged: "macroConsole.sync.lastMerged",
+  weeklyBackup: LAST_WEEKLY_BACKUP_KEY,
 };
 
 const API = "https://api.github.com";
@@ -171,6 +173,7 @@ const INBOX_LABELS = {
   bodyComp: "body comp",
   recipe: "recipe",
   delete: "delete",
+  workoutPlan: "workout plan",
 };
 
 export function summarizeInboxFiles(files) {
@@ -187,7 +190,7 @@ export function summarizeInboxFiles(files) {
       counts.set(label, (counts.get(label) || 0) + 1);
     }
   }
-  const preferred = ["food", "water", "steps", "workout", "weigh-in", "measurement", "body comp", "recipe", "delete"];
+  const preferred = ["food", "water", "steps", "workout", "weigh-in", "measurement", "body comp", "recipe", "workout plan", "delete"];
   const parts = [];
   for (const label of preferred) {
     if (counts.has(label)) parts.push(`${counts.get(label)} ${label}`);
@@ -329,12 +332,33 @@ export function payloadForUpload(source) {
     supplementRules: source && Array.isArray(source.supplementRules) ? source.supplementRules : [],
     workoutDays: source && Array.isArray(source.workoutDays) ? source.workoutDays : [],
     weeklyWorkoutTarget: source && source.weeklyWorkoutTarget != null ? source.weeklyWorkoutTarget : null,
+    workoutPlanBackups: source && Array.isArray(source.workoutPlanBackups) ? source.workoutPlanBackups : [],
     today: source ? source.today ?? null : null,
     days: source && Array.isArray(source.days) ? source.days : [],
     deleted: source && Array.isArray(source.deleted) ? source.deleted : [],
     conflicts: source && Array.isArray(source.conflicts) ? source.conflicts : [],
     applied: source && Array.isArray(source.applied) ? source.applied : [],
   };
+}
+
+export function weeklyBackupDue(lastDate, today) {
+  const last = String(lastDate || "");
+  const day = String(today || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(last) || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return true;
+  const [ly, lm, ld] = last.split("-").map(Number);
+  const [ty, tm, td] = day.split("-").map(Number);
+  const lastUtc = Date.UTC(ly, lm - 1, ld);
+  const todayUtc = Date.UTC(ty, tm - 1, td);
+  return Math.round((todayUtc - lastUtc) / 86400000) >= 7;
+}
+
+export function loadLastWeeklyBackupDate() {
+  const value = readKey(KEYS.weeklyBackup) || "";
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
+}
+
+function saveLastWeeklyBackup(day) {
+  writeKey(KEYS.weeklyBackup, day);
 }
 
 export function backupStamp(date = clock()) {
@@ -726,8 +750,25 @@ function composeMerge(localDoc, remoteDoc, inboxFiles, now) {
   const built = mergeWithInbox(withSavedLedger(localDoc), remoteDoc || {}, inboxFiles, now);
   let document = built.document;
   const settingsPatch = planPatchFromObject(built.settings);
+  if (built.workoutPlan) {
+    settingsPatch.workoutDays = document.workoutDays;
+    if (built.workoutPlan.weeklyWorkoutTarget != null && built.workoutPlan.weeklyWorkoutTarget !== "") {
+      settingsPatch.weeklyWorkoutTarget = document.weeklyWorkoutTarget;
+    }
+  }
   if (Object.keys(settingsPatch).length) document = applySettingsOntoDocument(document, settingsPatch);
   return { document, settingsPatch, accepted: built.accepted, skipped: built.skipped };
+}
+
+async function maybeWeeklyBackup(cfg, text) {
+  const today = localDateStamp();
+  if (!weeklyBackupDue(loadLastWeeklyBackupDate(), today)) return;
+  try {
+    await putFile(cfg, `${BACKUP_DIR}weekly-${today}.json`, text, `Weekly Macro Console backup ${today}`);
+    saveLastWeeklyBackup(today);
+  } catch {
+    // Leave the date unset so the next sync tries again. Existing backup files stay.
+  }
 }
 
 async function ensureLocalSafetyBackup(text) {
@@ -796,6 +837,7 @@ async function uploadOneWay(cfg, localText) {
   try { await ensureRemoteSnapshot(cfg, localText); } catch { /* a failed snapshot must not block the old upload path */ }
   await putFile(cfg, LATEST_PATH, localText, "Sync latest Macro Console data");
   await putHistoryIfMissing(cfg, localText);
+  await maybeWeeklyBackup(cfg, localText);
   try {
     const saved = JSON.parse(localText);
     saveTombstones(saved.deleted || []);
@@ -924,6 +966,7 @@ async function runSyncBody() {
       }
     }
     await putHistoryIfMissing(cfg, exportText(document, cfg.token));
+    await maybeWeeklyBackup(cfg, exportText(document, cfg.token));
     const moved = await markInboxProcessed(cfg, accepted);
     const imported = summarizeInboxFiles(accepted);
     const partial = moved.stuck > 0;

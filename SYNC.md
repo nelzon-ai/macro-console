@@ -68,10 +68,11 @@ The safety copy on the phone is written once, under its own storage keys (`macro
 
 In the private repo only:
 
-- `data/latest.json` — the merged backup (targets, plan settings, history, recipes, body comp, measurements, day logs, tombstones, and any kept conflict copies)
+- `data/latest.json` — the merged backup (targets, plan settings including `workoutDays`, history, recipes, body comp, measurements, day logs, tombstones, previous workout plans under `workoutPlanBackups`, and any kept conflict copies)
 - `data/history/YYYY-MM-DD.json` — the first snapshot written for that day. Later syncs leave an existing file alone.
 - `data/backups/<timestamp>.json` — the phone's full backup from before the first merged write
-- `data/inbox/*.json` — optional files an assistant adds. After a successful sync they are moved to `data/inbox/processed/`.
+- `data/backups/weekly-YYYY-MM-DD.json` — a full snapshot written on the first sync after 7 days. An existing backup file is left as it is. These files are never deleted.
+- `data/inbox/*.json` — optional files an assistant adds. After a successful sync they are moved to `data/inbox/processed/`. A `workoutPlan` entry replaces the saved plan and keeps the previous one. See [docs/REMOTE_ENTRIES.md](docs/REMOTE_ENTRIES.md).
 
 Nothing in this list is written to the public app repo. If you are offline, or GitHub does not answer, the app keeps your data and tries again later.
 

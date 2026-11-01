@@ -147,7 +147,8 @@ export function normalizeWorkoutDays(value) {
   return value.map((day, index) => {
     const exercises = Array.isArray(day && day.exercises) ? day.exercises : [];
     const key = String((day && day.key) || `day-${index + 1}`).trim() || `day-${index + 1}`;
-    return {
+    const dayNotes = String((day && day.notes) || "").trim();
+    const normalized = {
       key,
       label: String((day && day.label) || `Day ${index + 1}`).trim() || `Day ${index + 1}`,
       sub: String((day && day.sub) || ""),
@@ -155,7 +156,8 @@ export function normalizeWorkoutDays(value) {
       exercises: exercises.map((ex) => {
         const icon = EXERCISE_ICONS.includes(ex && ex.icon) ? ex.icon : "squat";
         const rest = finiteOrNull(ex && ex.rest);
-        return {
+        const notes = String((ex && ex.notes) || "").trim();
+        const exercise = {
           icon,
           name: String((ex && ex.name) || "").trim(),
           cue: String((ex && ex.cue) || ""),
@@ -165,8 +167,12 @@ export function normalizeWorkoutDays(value) {
           startWeight: ex && ex.startWeight != null ? String(ex.startWeight) : "",
           rest: rest == null ? 60 : rest,
         };
+        if (notes) exercise.notes = notes;
+        return exercise;
       }).filter((ex) => ex.name),
     };
+    if (dayNotes) normalized.notes = dayNotes;
+    return normalized;
   }).filter((day) => day.label);
 }
 
