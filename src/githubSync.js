@@ -2,21 +2,41 @@
 // the person configures on their phone. The token lives in localStorage and is
 // never written into the backup, the app repo, or a commit message.
 //
-// Local data is the source of truth: a conflict refreshes the file sha and
-// overwrites data/latest.json (and today's snapshot) with the phone's export.
+// Sync is two-way. The phone pulls data/latest.json and data/inbox/*.json,
+// unions them with the local backup, then uploads the result. An entry is
+// removed only by a tombstone. If the remote file cannot be fetched or parsed,
+// sync falls back to the old one-way upload and does not change local data.
+// Files already stored under data/history/ are never updated or deleted.
+
+import { planPatchFromObject } from "./planSettings.js";
+import {
+  emptyDocument,
+  mergeWithInbox,
+  applySettingsOntoDocument,
+  stampLocalChanges,
+  dataSignature,
+} from "./syncMerge.js";
 
 export const DEFAULT_REPO = "nelzon-ai/macro-console-data";
 export const DEFAULT_BRANCH = "main";
 export const LATEST_PATH = "data/latest.json";
 export const HISTORY_DIR = "data/history/";
+export const BACKUP_DIR = "data/backups/";
+export const INBOX_DIR = "data/inbox/";
+export const INBOX_PROCESSED_DIR = "data/inbox/processed/";
 export const PUBLIC_APP_REPO = "nelzon-ai/macro-console";
 export const DEFAULT_DEBOUNCE_MS = 2000;
+export const PRE_TWO_WAY_BACKUP_KEY = "macroConsole.sync.preTwoWayBackup";
 
 const KEYS = {
   token: "macroConsole.sync.token",
   repo: "macroConsole.sync.repo",
   branch: "macroConsole.sync.branch",
   status: "macroConsole.sync.status",
+  preBackup: PRE_TWO_WAY_BACKUP_KEY,
+  remoteBackupAt: "macroConsole.sync.remoteBackupAt",
+  tombstones: "macroConsole.sync.tombstones",
+  lastMerged: "macroConsole.sync.lastMerged",
 };
 
 const API = "https://api.github.com";
@@ -28,6 +48,8 @@ let locationOverride = null;
 let clock = () => new Date();
 let debounceMs = DEFAULT_DEBOUNCE_MS;
 let payloadGetter = null;
+let mergeApplier = null;
+let safetyBackupHandler = null;
 let timer = null;
 let running = null;
 let rerun = false;
@@ -41,6 +63,8 @@ export function setSyncClock(fn) { clock = fn; }
 export function setSyncDebounceMs(ms) { debounceMs = ms; }
 
 export function registerPayloadGetter(fn) { payloadGetter = fn; }
+export function registerMergeApplier(fn) { mergeApplier = fn; }
+export function registerSafetyBackupHandler(fn) { safetyBackupHandler = fn; }
 
 export function resetSyncState() {
   if (timer) clearTimeout(timer);
@@ -48,6 +72,8 @@ export function resetSyncState() {
   rerun = false;
   running = null;
   payloadGetter = null;
+  mergeApplier = null;
+  safetyBackupHandler = null;
   onlineOverride = null;
   locationOverride = null;
   storageOverride = null;
@@ -230,7 +256,93 @@ export function payloadForUpload(source) {
     workoutDays: source && Array.isArray(source.workoutDays) ? source.workoutDays : [],
     weeklyWorkoutTarget: source && source.weeklyWorkoutTarget != null ? source.weeklyWorkoutTarget : null,
     today: source ? source.today ?? null : null,
+    days: source && Array.isArray(source.days) ? source.days : [],
+    deleted: source && Array.isArray(source.deleted) ? source.deleted : [],
+    conflicts: source && Array.isArray(source.conflicts) ? source.conflicts : [],
   };
+}
+
+export function backupStamp(date = clock()) {
+  return date.toISOString().replace(/[:.]/g, "-");
+}
+
+export function loadPreTwoWayBackup() {
+  return readKey(KEYS.preBackup);
+}
+
+function loadJsonList(key) {
+  const raw = readKey(key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadTombstones() {
+  return loadJsonList(KEYS.tombstones);
+}
+
+function saveTombstones(list) {
+  writeKey(KEYS.tombstones, JSON.stringify(list));
+}
+
+function loadLastMerged() {
+  const raw = readKey(KEYS.lastMerged);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastMerged(doc) {
+  const copy = emptyDocument(doc);
+  copy.conflicts = [];
+  writeKey(KEYS.lastMerged, JSON.stringify(copy));
+}
+
+function tombstoneIdentity(tomb) {
+  if (!tomb || !tomb.collection) return "";
+  if (tomb.collection === "foods") return `foods:${tomb.date || ""}:${tomb.id || ""}`;
+  if (tomb.collection === "recipes") return `recipes:${tomb.id || ""}:${String(tomb.name || "").toLowerCase()}`;
+  return `${tomb.collection}:${tomb.date || ""}`;
+}
+
+export function recordTombstone(tomb) {
+  if (!tomb || !tomb.collection) return loadTombstones();
+  const next = {
+    collection: tomb.collection,
+    id: tomb.id || undefined,
+    name: tomb.name || undefined,
+    date: tomb.date || undefined,
+    deletedAt: tomb.deletedAt || clock().toISOString(),
+  };
+  const key = tombstoneIdentity(next);
+  const list = loadTombstones().filter((item) => tombstoneIdentity(item) !== key);
+  list.push(next);
+  saveTombstones(list);
+  return list;
+}
+
+export function forgetTombstone(tomb) {
+  const key = tombstoneIdentity(tomb || {});
+  const list = loadTombstones().filter((item) => tombstoneIdentity(item) !== key);
+  saveTombstones(list);
+  return list;
+}
+
+export function base64ToUtf8(b64) {
+  const clean = String(b64 || "").replace(/\s/g, "");
+  if (!clean) return "";
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
 }
 
 export function utf8ToBase64(text) {
@@ -350,10 +462,26 @@ export async function assertPrivateRepo(cfg = loadSyncConfig()) {
   return { ok: true, code: "ok", owner: parsed.owner, name: parsed.name, branch };
 }
 
+function encodeRepoPath(path) {
+  return String(path || "").split("/").filter(Boolean).map((part) => encodeURIComponent(part)).join("/");
+}
+
+function assertWritablePath(path) {
+  const historyFile = path.startsWith(HISTORY_DIR) && path.slice(HISTORY_DIR.length).endsWith(".json") && !path.slice(HISTORY_DIR.length).includes("/");
+  const backupFile = path.startsWith(BACKUP_DIR) && path.slice(BACKUP_DIR.length).endsWith(".json") && !path.slice(BACKUP_DIR.length).includes("/");
+  const processedFile = path.startsWith(INBOX_PROCESSED_DIR) && path.slice(INBOX_PROCESSED_DIR.length).endsWith(".json") && !path.slice(INBOX_PROCESSED_DIR.length).includes("/");
+  const allowed = path === LATEST_PATH || historyFile || backupFile || processedFile;
+  if (!allowed || path.includes("..")) {
+    const error = new Error("Sync refused to write that file.");
+    error.code = "blocked_repo";
+    throw error;
+  }
+}
+
 async function getFileSha(cfg, path) {
   const { owner, name } = parseRepo(cfg.repo);
   const branch = parseBranch(cfg.branch);
-  const res = await github(`/repos/${owner}/${name}/contents/${path}`, {
+  const res = await github(`/repos/${owner}/${name}/contents/${encodeRepoPath(path)}`, {
     token: cfg.token,
     query: { ref: branch },
   });
@@ -363,22 +491,27 @@ async function getFileSha(cfg, path) {
   return res.data.sha;
 }
 
-async function putFile(cfg, path, text, message) {
+async function putFile(cfg, path, text, message, options = {}) {
+  assertWritablePath(path);
+  const createOnly = !!options.createOnly || path.startsWith(HISTORY_DIR) || path.startsWith(BACKUP_DIR);
   const { owner, name } = parseRepo(cfg.repo);
   const branch = parseBranch(cfg.branch);
-  let sha = await getFileSha(cfg, path);
+  let sha = options.knownSha ? (options.sha || null) : await getFileSha(cfg, path);
+  if (sha && createOnly) return { skipped: true };
   let last = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     const body = { message, content: utf8ToBase64(text), branch };
     if (sha) body.sha = sha;
-    last = await github(`/repos/${owner}/${name}/contents/${path}`, {
+    last = await github(`/repos/${owner}/${name}/contents/${encodeRepoPath(path)}`, {
       method: "PUT",
       token: cfg.token,
       body,
     });
-    if (last.ok) return;
+    if (last.ok) return { skipped: false };
+    if ((last.status === 409 || last.status === 422) && options.singleAttempt) throw httpError(last);
     if (last.status === 409 || last.status === 422) {
       const fresh = await getFileSha(cfg, path);
+      if (createOnly && fresh) return { skipped: true };
       if (fresh && fresh !== sha) {
         sha = fresh;
         continue;
@@ -394,6 +527,22 @@ async function putFile(cfg, path, text, message) {
   throw httpError(last || { status: 409, data: { message: "" } });
 }
 
+async function deleteInboxFile(cfg, path, sha) {
+  if (!path.startsWith(INBOX_DIR) || path.startsWith(INBOX_PROCESSED_DIR) || path.includes("..")) {
+    const error = new Error("Sync refused to delete that file.");
+    error.code = "blocked_repo";
+    throw error;
+  }
+  const { owner, name } = parseRepo(cfg.repo);
+  const branch = parseBranch(cfg.branch);
+  const res = await github(`/repos/${owner}/${name}/contents/${encodeRepoPath(path)}`, {
+    method: "DELETE",
+    token: cfg.token,
+    body: { message: "Mark Macro Console inbox file processed", sha, branch },
+  });
+  if (!res.ok && res.status !== 404) throw httpError(res);
+}
+
 function exportText(payload, token) {
   const safe = payloadForUpload(payload);
   const text = `${JSON.stringify(safe, null, 2)}\n`;
@@ -403,6 +552,141 @@ function exportText(payload, token) {
     throw error;
   }
   return text;
+}
+
+function dedupeTombs(list) {
+  const byKey = new Map();
+  for (const tomb of list || []) {
+    const key = tombstoneIdentity(tomb);
+    if (!key) continue;
+    byKey.set(key, tomb);
+  }
+  return [...byKey.values()];
+}
+
+function localDocumentFromPayload(payload, now) {
+  const uploaded = payloadForUpload(payload);
+  uploaded.deleted = dedupeTombs([...(uploaded.deleted || []), ...loadTombstones()]);
+  return stampLocalChanges(uploaded, loadLastMerged(), now);
+}
+
+async function readContentFile(cfg, path) {
+  const { owner, name } = parseRepo(cfg.repo);
+  const branch = parseBranch(cfg.branch);
+  const res = await github(`/repos/${owner}/${name}/contents/${encodeRepoPath(path)}`, {
+    token: cfg.token,
+    query: { ref: branch },
+  });
+  if (res.status === 404) return { missing: true, sha: null, doc: null, text: "" };
+  if (!res.ok) throw httpError(res);
+  if (Array.isArray(res.data) || !res.data || res.data.content == null) {
+    const error = new Error("Couldn't read a file in the private repo. Nothing on this phone was changed.");
+    error.code = "network";
+    throw error;
+  }
+  const text = base64ToUtf8(res.data.content);
+  try {
+    const doc = JSON.parse(text);
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+      return { missing: false, sha: res.data.sha, doc: null, text, unparsed: true };
+    }
+    return { missing: false, sha: res.data.sha, doc, text, unparsed: false };
+  } catch {
+    return { missing: false, sha: res.data.sha, doc: null, text, unparsed: true };
+  }
+}
+
+async function loadInboxFiles(cfg) {
+  const { owner, name } = parseRepo(cfg.repo);
+  const branch = parseBranch(cfg.branch);
+  const res = await github(`/repos/${owner}/${name}/contents/${encodeRepoPath("data/inbox")}`, {
+    token: cfg.token,
+    query: { ref: branch },
+  });
+  if (res.status === 404) return [];
+  if (!res.ok) throw httpError(res);
+  if (!Array.isArray(res.data)) return [];
+  const files = res.data.filter((item) => item && item.type === "file" && String(item.name || "").endsWith(".json"));
+  const loaded = [];
+  for (const item of files) {
+    const path = item.path || `${INBOX_DIR}${item.name}`;
+    const file = await readContentFile(cfg, path);
+    loaded.push({
+      name: item.name,
+      path,
+      sha: file.sha || item.sha,
+      body: file.text || "",
+    });
+  }
+  return loaded;
+}
+
+function composeMerge(localDoc, remoteDoc, inboxFiles, now) {
+  const built = mergeWithInbox(localDoc, remoteDoc || {}, inboxFiles, now);
+  let document = built.document;
+  const settingsPatch = planPatchFromObject(built.settings);
+  if (Object.keys(settingsPatch).length) document = applySettingsOntoDocument(document, settingsPatch);
+  return { document, settingsPatch, accepted: built.accepted, skipped: built.skipped };
+}
+
+async function ensureLocalSafetyBackup(text) {
+  if (readKey(KEYS.preBackup)) return true;
+  const wrote = writeKey(KEYS.preBackup, text);
+  let handled = false;
+  if (safetyBackupHandler) {
+    try { handled = (await safetyBackupHandler({ text })) === true; } catch { handled = false; }
+  }
+  return !!(wrote || handled || readKey(KEYS.preBackup));
+}
+
+async function ensureRemoteSnapshot(cfg, text) {
+  if (readKey(KEYS.remoteBackupAt)) return;
+  const path = `${BACKUP_DIR}${backupStamp()}.json`;
+  await putFile(cfg, path, text, "Backup Macro Console data before merge");
+  writeKey(KEYS.remoteBackupAt, clock().toISOString());
+}
+
+async function putHistoryIfMissing(cfg, text) {
+  const day = localDateStamp();
+  await putFile(cfg, `${HISTORY_DIR}${day}.json`, text, `Snapshot Macro Console data for ${day}`);
+}
+
+async function markInboxProcessed(cfg, files) {
+  for (const file of files) {
+    let body = file.body || "{}\n";
+    try {
+      const parsed = JSON.parse(body);
+      parsed.processedAt = clock().toISOString();
+      body = `${JSON.stringify(parsed, null, 2)}\n`;
+    } catch { /* leave the original text */ }
+    const name = file.name;
+    await putFile(cfg, `${INBOX_PROCESSED_DIR}${name}`, body, "Mark Macro Console inbox file processed");
+    if (file.sha) await deleteInboxFile(cfg, file.path || `${INBOX_DIR}${name}`, file.sha);
+  }
+}
+
+async function finishSynced(prev, message) {
+  const lastSyncedAt = clock().toISOString();
+  const status = emit({
+    state: "synced",
+    pending: false,
+    code: "ok",
+    message,
+    lastSyncedAt,
+  });
+  return { ok: true, lastSyncedAt, message: status.message };
+}
+
+async function uploadOneWay(cfg, localText) {
+  try { await ensureRemoteSnapshot(cfg, localText); } catch { /* a failed snapshot must not block the old upload path */ }
+  await putFile(cfg, LATEST_PATH, localText, "Sync latest Macro Console data");
+  await putHistoryIfMissing(cfg, localText);
+  try {
+    const saved = JSON.parse(localText);
+    saveTombstones(saved.deleted || []);
+    saveLastMerged(saved);
+  } catch { /* the upload already succeeded; a bad local parse must not fail the sync */ }
+  return finishSynced(null, "Synced to your private repo.");
 }
 
 async function runSyncBody() {
@@ -441,19 +725,74 @@ async function runSyncBody() {
       });
       return { ok: false, refused, pending: retry, message: status.message };
     }
-    const text = exportText(payload, cfg.token);
-    const day = localDateStamp();
-    await putFile(cfg, LATEST_PATH, text, "Sync latest Macro Console data");
-    await putFile(cfg, `${HISTORY_DIR}${day}.json`, text, `Snapshot Macro Console data for ${day}`);
-    const lastSyncedAt = clock().toISOString();
-    const status = emit({
-      state: "synced",
-      pending: false,
-      code: "ok",
-      message: "Synced to your private repo.",
-      lastSyncedAt,
-    });
-    return { ok: true, lastSyncedAt, message: status.message };
+    const now = clock().toISOString();
+    const localDoc = localDocumentFromPayload(payload, now);
+    const localText = exportText(localDoc, cfg.token);
+    const backedUp = await ensureLocalSafetyBackup(localText);
+    if (!backedUp) {
+      const status = emit({
+        state: "error",
+        pending: false,
+        code: "backup",
+        message: "Couldn't save a safety backup on this phone, so nothing was synced and your logs were left as they are.",
+        lastSyncedAt: prev.lastSyncedAt,
+      });
+      return { ok: false, message: status.message };
+    }
+
+    let remote;
+    try {
+      remote = await readContentFile(cfg, LATEST_PATH);
+    } catch {
+      return uploadOneWay(cfg, localText);
+    }
+    if (remote.unparsed) return uploadOneWay(cfg, localText);
+
+    let inboxFiles = [];
+    try {
+      inboxFiles = await loadInboxFiles(cfg);
+    } catch (err) {
+      if (!remote.missing) throw err;
+      return uploadOneWay(cfg, localText);
+    }
+
+    if (remote.missing && inboxFiles.length === 0) return uploadOneWay(cfg, localText);
+
+    let built = composeMerge(localDoc, remote.missing ? {} : remote.doc, inboxFiles, now);
+    await ensureRemoteSnapshot(cfg, localText);
+    const apply = async (document, settingsPatch) => {
+      if (!mergeApplier) return;
+      if (dataSignature(localDoc) === dataSignature(document) && Object.keys(settingsPatch || {}).length === 0) return;
+      await mergeApplier(document, { settings: settingsPatch || {} });
+    };
+    await apply(built.document, built.settingsPatch);
+
+    let sha = remote.sha || null;
+    let document = built.document;
+    let accepted = built.accepted;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const text = exportText(document, cfg.token);
+      try {
+        await putFile(cfg, LATEST_PATH, text, "Sync latest Macro Console data", { knownSha: true, sha, singleAttempt: true });
+        break;
+      } catch (err) {
+        if (err.code !== "conflict" || attempt === 2) throw err;
+        const fresh = await readContentFile(cfg, LATEST_PATH);
+        if (fresh.unparsed || fresh.missing) throw err;
+        built = composeMerge(localDoc, fresh.doc, inboxFiles, clock().toISOString());
+        document = built.document;
+        accepted = built.accepted;
+        sha = fresh.sha;
+        await apply(document, built.settingsPatch);
+      }
+    }
+    await putHistoryIfMissing(cfg, exportText(document, cfg.token));
+    try {
+      await markInboxProcessed(cfg, accepted);
+    } catch { /* next sync imports the same file again; ids keep that from duplicating */ }
+    saveTombstones(document.deleted || []);
+    saveLastMerged(document);
+    return finishSynced(prev, "Synced. This phone and the private repo now share one merged backup.");
   } catch (err) {
     const code = err.code || "network";
     const retry = code === "network" || code === "conflict" || code === "offline";

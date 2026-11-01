@@ -1,0 +1,251 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mergeDocuments, mergeWithInbox, stampLocalChanges } from "../src/syncMerge.js";
+
+const NOW = "2026-04-01T12:00:00.000Z";
+const EARLIER = "2026-03-01T12:00:00.000Z";
+const LATER = "2026-04-02T12:00:00.000Z";
+
+function food(id, name, calories, updatedAt) {
+  return { id, name, calories, protein: 1, carbs: 2, fat: 1, fiber: 1, updatedAt };
+}
+
+function day(date, foods, extra = {}) {
+  return {
+    date,
+    updatedAt: extra.updatedAt || null,
+    day: {
+      foods,
+      weight: extra.weight ?? null,
+      water: extra.water || 0,
+      steps: extra.steps ?? null,
+      workout: extra.workout || null,
+      locked: !!extra.locked,
+    },
+  };
+}
+
+function historyRow(date, extra = {}) {
+  return {
+    date,
+    calories: extra.calories || 0,
+    protein: extra.protein || 0,
+    carbs: extra.carbs || 0,
+    fat: extra.fat || 0,
+    fiber: extra.fiber || 0,
+    weight: extra.weight ?? null,
+    water: extra.water || 0,
+    steps: extra.steps ?? null,
+    workoutDone: !!extra.workoutDone,
+    updatedAt: extra.updatedAt,
+  };
+}
+
+function base(overrides = {}) {
+  return {
+    targets: { calories: 2000 },
+    meta: { streak: 2 },
+    history: [],
+    recipes: [],
+    bodyComp: [],
+    measurements: [],
+    milestones: [],
+    mealTypes: ["Breakfast"],
+    supplementGroups: [],
+    supplementRules: [],
+    workoutDays: [],
+    weeklyWorkoutTarget: 3,
+    today: null,
+    days: [],
+    deleted: [],
+    conflicts: [],
+    ...overrides,
+  };
+}
+
+test("adds on both sides all survive", () => {
+  const local = base({
+    history: [historyRow("2026-01-01", { calories: 100, weight: 150 })],
+    recipes: [{ id: "local-recipe", name: "Example oats", calories: 100 }],
+    bodyComp: [{ date: "2026-01-01", weight: 150, bodyFatPct: 20 }],
+    measurements: [{ date: "2026-01-01", waist: 80 }],
+    days: [day("2026-01-01", [food("food-local", "Example oats", 100)])],
+  });
+  const remote = base({
+    targets: { calories: 9999 },
+    history: [historyRow("2026-01-02", { calories: 80, weight: 149, workoutDone: true })],
+    recipes: [{ id: "remote-recipe", name: "Example stew", calories: 80 }],
+    bodyComp: [{ date: "2026-01-02", weight: 149, bodyFatPct: 19 }],
+    measurements: [{ date: "2026-01-02", waist: 79 }],
+    days: [day("2026-01-02", [food("food-remote", "Example stew", 80)], { workout: { done: true, type: "Example session", duration: 20 } })],
+  });
+  const { document } = mergeDocuments(local, remote, { now: NOW });
+  assert.deepEqual(document.history.map((row) => row.date), ["2026-01-01", "2026-01-02"]);
+  assert.deepEqual(document.recipes.map((row) => row.id).sort(), ["local-recipe", "remote-recipe"]);
+  assert.deepEqual(document.bodyComp.map((row) => row.date), ["2026-01-01", "2026-01-02"]);
+  assert.deepEqual(document.measurements.map((row) => row.date), ["2026-01-01", "2026-01-02"]);
+  const ids = document.days.flatMap((rec) => rec.day.foods.map((item) => item.id)).sort();
+  assert.deepEqual(ids, ["food-local", "food-remote"]);
+  assert.equal(document.days.find((rec) => rec.date === "2026-01-02").day.workout.done, true);
+  assert.equal(document.targets.calories, 2000);
+});
+
+test("edits on both sides keep the newer copy and retain the older one", () => {
+  const local = base({
+    recipes: [{ id: "shared", name: "Example oats", calories: 100, updatedAt: LATER }],
+    history: [historyRow("2026-01-01", { weight: 150, updatedAt: EARLIER })],
+    days: [day("2026-01-01", [food("shared-food", "Example oats", 100, EARLIER)])],
+  });
+  const remote = base({
+    recipes: [{ id: "shared", name: "Example oats", calories: 90, updatedAt: EARLIER }],
+    history: [historyRow("2026-01-01", { weight: 140, updatedAt: LATER })],
+    days: [day("2026-01-01", [food("shared-food", "Example oats", 80, LATER)])],
+  });
+  const { document } = mergeDocuments(local, remote, { now: NOW });
+  assert.equal(document.recipes.length, 1);
+  assert.equal(document.recipes[0].calories, 100);
+  assert.equal(document.history[0].weight, 140);
+  assert.equal(document.days[0].day.foods[0].calories, 80);
+  assert.equal(document.conflicts.some((item) => item.collection === "recipes" && item.dropped.calories === 90), true);
+  assert.equal(document.conflicts.some((item) => item.collection === "history" && item.dropped.weight === 150), true);
+  assert.equal(document.conflicts.some((item) => item.collection === "foods" && item.dropped.calories === 100), true);
+});
+
+test("a delete tombstone removes the entry and a later edit puts it back", () => {
+  const local = base({
+    recipes: [{ id: "keep", name: "Example stew", calories: 10 }],
+    days: [day("2026-01-01", [food("gone", "Example oats", 100, EARLIER), food("back", "Example toast", 50, LATER)])],
+    deleted: [{ collection: "foods", id: "gone", date: "2026-01-01", deletedAt: NOW }],
+  });
+  const remote = base({
+    recipes: [{ id: "drop", name: "Example soup", calories: 20 }],
+    days: [day("2026-01-01", [food("gone", "Example oats", 100, EARLIER), food("back", "Example toast", 40, EARLIER)])],
+    deleted: [{ collection: "recipes", id: "drop", deletedAt: NOW }],
+  });
+  const { document } = mergeDocuments(local, remote, { now: NOW });
+  const foods = document.days[0].day.foods;
+  assert.equal(foods.some((item) => item.id === "gone"), false);
+  assert.equal(foods.some((item) => item.id === "back"), true);
+  assert.equal(foods.find((item) => item.id === "back").calories, 50);
+  assert.equal(document.recipes.some((item) => item.id === "drop"), false);
+  assert.equal(document.recipes.some((item) => item.id === "keep"), true);
+  assert.equal(document.conflicts.some((item) => item.reason === "deleted" && item.dropped && (item.dropped.id === "gone" || (item.dropped.foods || item.dropped.name))), true);
+});
+
+test("missing an entry on one side does not delete it", () => {
+  const local = base({
+    history: [historyRow("2026-01-01", { calories: 100 })],
+    recipes: [{ id: "only-local", name: "Example oats", calories: 100 }],
+  });
+  const remote = base({
+    history: [historyRow("2026-01-03", { calories: 50 })],
+    measurements: [{ date: "2026-01-03", waist: 70 }],
+  });
+  const { document } = mergeDocuments(local, remote, { now: NOW });
+  assert.equal(document.history.length, 2);
+  assert.equal(document.recipes.length, 1);
+  assert.equal(document.measurements.length, 1);
+  assert.equal(document.deleted.length, 0);
+});
+
+test("duplicate ids and duplicate content collapse", () => {
+  const dup = food("same", "Example oats", 100, EARLIER);
+  const newer = food("same", "Example oats", 110, LATER);
+  const local = base({
+    days: [day("2026-01-01", [dup, newer, { name: "Example toast", calories: 40, protein: 1, carbs: 2, fat: 1, fiber: 0 }, { name: "Example toast", calories: 40, protein: 1, carbs: 2, fat: 1, fiber: 0 }])],
+    recipes: [
+      { id: "r", name: "Example stew", calories: 10, updatedAt: EARLIER },
+      { id: "r", name: "Example stew", calories: 12, updatedAt: LATER },
+    ],
+  });
+  const { document } = mergeDocuments(local, base(), { now: NOW });
+  assert.equal(document.days[0].day.foods.filter((item) => item.id === "same").length, 1);
+  assert.equal(document.days[0].day.foods.find((item) => item.id === "same").calories, 110);
+  const toast = document.days[0].day.foods.filter((item) => item.name === "Example toast");
+  assert.equal(toast.length, 1);
+  assert.equal(document.recipes.length, 1);
+  assert.equal(document.recipes[0].calories, 12);
+});
+
+test("inbox entries union with local rows and a settings patch stays explicit", () => {
+  const local = base({
+    targets: { calories: 2000, protein: 150 },
+    days: [day("2026-01-01", [food("food-local", "Example oats", 100)])],
+    history: [historyRow("2026-01-01", { calories: 100 })],
+  });
+  const inbox = {
+    name: "example.json",
+    body: JSON.stringify({
+      id: "batch-example",
+      createdAt: NOW,
+      settings: { targets: { calories: 1800, protein: 140, carbs: 150, fat: 60, fiber: 30, water: 2000, steps: 8000 } },
+      entries: [
+        { type: "food", date: "2026-01-01", id: "food-remote", name: "Example stew", calories: 80, protein: 4, carbs: 6, fat: 2, fiber: 1, updatedAt: NOW },
+        { type: "weighIn", date: "2026-01-02", weight: 150, updatedAt: NOW },
+        { type: "workout", date: "2026-01-02", done: true, workoutType: "Example session", duration: 30, updatedAt: NOW },
+        { type: "measurement", date: "2026-01-02", waist: 80, updatedAt: NOW },
+        { type: "bodyComp", date: "2026-01-02", bodyFatPct: 20, updatedAt: NOW },
+        { type: "recipe", id: "recipe-remote", name: "Example stew", calories: 80, updatedAt: NOW },
+        { type: "delete", collection: "recipes", id: "does-not-exist", deletedAt: NOW },
+      ],
+    }),
+  };
+  const merged = mergeWithInbox(local, {}, [inbox], NOW);
+  const foods = merged.document.days.find((rec) => rec.date === "2026-01-01").day.foods;
+  assert.deepEqual(foods.map((item) => item.id).sort(), ["food-local", "food-remote"]);
+  assert.equal(merged.document.history.find((row) => row.date === "2026-01-02").weight, 150);
+  assert.equal(merged.document.history.find((row) => row.date === "2026-01-02").workoutDone, true);
+  assert.equal(merged.document.measurements[0].waist, 80);
+  assert.equal(merged.document.bodyComp[0].bodyFatPct, 20);
+  assert.equal(merged.document.recipes.some((item) => item.id === "recipe-remote"), true);
+  assert.equal(merged.settings.targets.calories, 1800);
+  assert.equal(merged.accepted.length, 1);
+  const broken = mergeWithInbox(local, local, [{ name: "bad.json", body: "{nope" }], NOW);
+  assert.equal(broken.skipped.length, 1);
+  assert.equal(broken.document.recipes.length, local.recipes.length);
+});
+
+test("an inbox edit with a time beats an unstamped phone row", () => {
+  const local = base({
+    days: [day("2026-01-01", [food("food-1", "Example oats", 100)])],
+    history: [historyRow("2026-01-01", { calories: 100 })],
+  });
+  const inbox = {
+    name: "edit.json",
+    body: JSON.stringify({
+      entries: [{
+        type: "food",
+        date: "2026-01-01",
+        id: "food-1",
+        name: "Example oats",
+        calories: 90,
+        protein: 1,
+        carbs: 2,
+        fat: 1,
+        fiber: 1,
+        updatedAt: NOW,
+      }],
+    }),
+  };
+  const merged = mergeWithInbox(local, {}, [inbox], NOW);
+  assert.equal(merged.document.days[0].day.foods[0].calories, 90);
+  assert.equal(merged.document.conflicts.some((item) => item.collection === "foods" && item.dropped.calories === 100), true);
+});
+
+test("stampLocalChanges marks an edit and leaves untouched rows alone", () => {
+  const previous = base({
+    history: [historyRow("2026-01-01", { calories: 100, updatedAt: EARLIER })],
+    days: [day("2026-01-01", [food("food-1", "Example oats", 100, EARLIER)])],
+  });
+  const untouched = stampLocalChanges(base({
+    history: [historyRow("2026-01-01", { calories: 100 })],
+    days: [day("2026-01-01", [food("food-1", "Example oats", 100)])],
+  }), null, NOW);
+  assert.equal(untouched.history[0].updatedAt, undefined);
+  const stamped = stampLocalChanges(base({
+    history: [historyRow("2026-01-01", { calories: 90 })],
+    days: [day("2026-01-01", [food("food-1", "Example oats", 90)])],
+  }), previous, NOW);
+  assert.equal(stamped.history[0].updatedAt, NOW);
+  assert.equal(stamped.days[0].day.foods[0].updatedAt, NOW);
+});

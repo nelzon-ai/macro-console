@@ -45,18 +45,41 @@ Do not paste the token into a chat, an email, a note you share, or the public Ma
    - If it warns that the repo is **public**, nothing has been uploaded. Make the repo private (step 1.6) and test again.
 8. Tap **Sync now**. When it says it synced, you are done.
 
-After that, the phone sends an update on its own a couple of seconds after you save a day, lock a day, or change weight, body comp, measurements, recipes, targets, or the plan in Settings. It also syncs when you open the app. You can ignore it.
+After that, the phone syncs on its own a couple of seconds after you save a day, lock a day, or change weight, body comp, measurements, recipes, targets, or the plan in Settings. It also syncs when you open the app.
 
-Targets, milestones, meal types, supplements, and the workout split are edited in Settings and travel with that private backup. The exact JSON shape is in [SETTINGS.md](SETTINGS.md). Use **Import settings** there if you keep a private copy of that file. Do not put the filled-in file in this public repo.
+Each sync reads the private repo, merges that with the phone, then writes the combined backup. A meal, workout, weigh-in, or measurement added in the repo shows up on the phone. A row that exists on only one side is kept. The app does not treat "missing from the file" as a delete, so clearing the phone and then syncing brings the private repo's rows back. To remove a row, add a delete entry (see below). If the same row was edited on both sides, the newer `updatedAt` wins, and the other copy is kept inside `conflicts` in `data/latest.json` so it is not thrown away.
+
+If GitHub cannot be reached, or `data/latest.json` is not valid JSON, the phone uploads its own copy as before and does not change the logs already on the phone.
+
+Targets and the rest of the plan stay as they are on the phone unless an inbox file includes a `settings` object. The shape for that object is in [SETTINGS.md](SETTINGS.md). Do not put a filled-in settings file in this public repo.
+
+## Update safely
+
+Do this once after this version is deployed, on the phone, while online:
+
+1. Open Macro Console from the home-screen icon and leave it open for a few seconds so it can pick up the new version. If the screen looks unchanged, switch away and open it again.
+2. The first sync saves a full safety copy before it merges anything. It stores that copy on the phone, offers a JSON download (`macro-console-safety-backup.json`), and writes `data/backups/<timestamp>.json` in the private repo. Keep the downloaded file. You can also tap Settings → Sync → **Download safety backup** later.
+3. You do not need to paste the token again if it is already saved. Tap **Sync now** if you want to see it finish. When it says it synced, entries added in the private repo are on the phone.
+4. Do not delete files under `data/history/` in the private repo. The app will not change or remove those files. It only creates the current day's file when that file is not there yet.
+
+The safety copy on the phone is written once, under its own storage keys (`macroConsole.sync.preTwoWayBackup` in the browser's local storage, and `preTwoWayBackup` in the app database). A later sync does not overwrite it. The private-repo snapshot is also written once, before the first merged upload, and is a new file. It is not a replacement for `data/latest.json`.
 
 ## What gets saved, and where
 
 In the private repo only:
 
-- `data/latest.json` — the full backup (targets, plan settings, history, recipes, body comp, measurements, and today)
-- `data/history/YYYY-MM-DD.json` — a snapshot for that day
+- `data/latest.json` — the merged backup (targets, plan settings, history, recipes, body comp, measurements, day logs, tombstones, and any kept conflict copies)
+- `data/history/YYYY-MM-DD.json` — the first snapshot written for that day. Later syncs leave an existing file alone.
+- `data/backups/<timestamp>.json` — the phone's full backup from before the first merged write
+- `data/inbox/*.json` — optional files an assistant adds. After a successful sync they are moved to `data/inbox/processed/`.
 
-The phone is still the copy that counts. Sync never deletes what is on the phone. If you are offline, or GitHub does not answer, the app keeps your data and tries again later.
+Nothing in this list is written to the public app repo. If you are offline, or GitHub does not answer, the app keeps your data and tries again later.
+
+## Adding entries from the private repo
+
+Put a JSON file in `data/inbox/` (any name ending in `.json`). The phone imports it on the next sync, then moves it to `data/inbox/processed/`. Importing the same file twice does not duplicate rows. The field list and one fake example of each entry type are in [docs/REMOTE_ENTRIES.md](docs/REMOTE_ENTRIES.md).
+
+You can also edit `data/latest.json` directly. New rows are added. To change an existing row, set `updatedAt` to the current time. To remove a row, add a tombstone under `deleted` (or an inbox `delete` entry). Deleting a row from the JSON without a tombstone does not remove it: the next sync puts it back.
 
 ## Turn it off
 

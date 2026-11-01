@@ -23,7 +23,11 @@ import {
   utf8ToBase64,
   LATEST_PATH,
   PUBLIC_APP_REPO,
+  PRE_TWO_WAY_BACKUP_KEY,
   isBlockedRepo,
+  registerMergeApplier,
+  loadPreTwoWayBackup,
+  recordTombstone,
 } from "../src/githubSync.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -49,9 +53,15 @@ function privateRepo() {
   return { private: true, visibility: "private", default_branch: "main", full_name: "nelzon-ai/macro-console-data" };
 }
 
+function contentPath(url) {
+  const raw = String(url).split("/contents/")[1] || "";
+  return decodeURIComponent(raw.split("?")[0]);
+}
+
 function installHappyFetch(extra = {}) {
   const calls = [];
   const shas = { [LATEST_PATH]: extra.latestSha ?? null, history: extra.historySha ?? null };
+  const latestText = extra.latestText == null ? "{\"remote\":true}\n" : extra.latestText;
   const fn = async (url, init = {}) => {
     const call = {
       url: String(url),
@@ -68,24 +78,48 @@ function installHappyFetch(extra = {}) {
       return json(200, extra.repo || privateRepo());
     }
     if (u.includes("/branches/")) return json(200, { name: "main" });
-    if (u.includes("/contents/") && call.method === "GET") {
-      const path = decodeURIComponent(u.split("/contents/")[1].split("?")[0]);
-      const sha = path === LATEST_PATH ? shas[LATEST_PATH] : shas.history;
-      if (!sha) return json(404, { message: "Not Found" });
-      return json(200, { sha, type: "file", content: utf8ToBase64("{\"remote\":true}\n") });
+    if (u.includes("/contents/") && (call.method === "GET" || call.method === "DELETE")) {
+      const path = contentPath(u);
+      if (extra.onGet) {
+        const custom = extra.onGet(path, call, shas);
+        if (custom) return custom;
+      }
+      if (path === "data/inbox") {
+        if (!extra.inbox) return json(404, { message: "Not Found" });
+        return json(200, extra.inbox);
+      }
+      if (path.startsWith("data/inbox/")) {
+        const file = (extra.inboxFiles || {})[path];
+        if (!file) return json(404, { message: "Not Found" });
+        if (call.method === "DELETE") {
+          delete extra.inboxFiles[path];
+          return json(200, { commit: { sha: "deleted" } });
+        }
+        return json(200, { sha: file.sha, type: "file", content: utf8ToBase64(file.text) });
+      }
+      if (path.startsWith("data/backups/")) return json(404, { message: "Not Found" });
+      if (path === LATEST_PATH) {
+        if (!shas[LATEST_PATH]) return json(404, { message: "Not Found" });
+        return json(200, { sha: shas[LATEST_PATH], type: "file", content: utf8ToBase64(latestText) });
+      }
+      if (path.startsWith("data/history/")) {
+        if (!shas.history) return json(404, { message: "Not Found" });
+        return json(200, { sha: shas.history, type: "file", content: utf8ToBase64("{\"history\":true}\n") });
+      }
+      return json(404, { message: "Not Found" });
     }
     if (u.includes("/contents/") && call.method === "PUT") {
       if (extra.onPut) {
         const result = extra.onPut(call, shas);
         if (result) return result;
       }
-      const path = decodeURIComponent(u.split("/contents/")[1].split("?")[0]);
+      const path = contentPath(u);
       if (path === LATEST_PATH && shas[LATEST_PATH] && call.body.sha !== shas[LATEST_PATH]) {
         return json(409, { message: "sha mismatch" });
       }
-      const next = path === LATEST_PATH ? "sha-latest" : "sha-history";
+      const next = path === LATEST_PATH ? "sha-latest" : `sha-${path.split("/").pop()}`;
       if (path === LATEST_PATH) shas[LATEST_PATH] = next;
-      else shas.history = next;
+      else if (path.startsWith("data/history/")) shas.history = next;
       return json(201, { content: { sha: next } });
     }
     return json(500, { message: `unexpected ${call.method} ${u}` });
@@ -185,14 +219,19 @@ test("writes latest.json and today's snapshot, creating files when they are miss
   assert.equal(loadSyncStatus().pending, false);
   assert.equal(loadSyncStatus().lastSyncedAt, FIXED.toISOString());
   const puts = calls.filter((c) => c.method === "PUT");
-  assert.equal(puts.length, 2);
-  assert.ok(puts[0].url.endsWith("/contents/data/latest.json"));
-  assert.ok(puts[1].url.endsWith("/contents/data/history/2026-10-24.json"));
-  assert.equal(puts[0].body.sha, undefined);
-  assert.equal(puts[0].body.branch, "main");
-  assert.equal(puts[0].auth, "Bearer test-token-not-real");
-  const decoded = JSON.parse(base64ToUtf8(puts[0].body.content));
-  assert.deepEqual(Object.keys(decoded), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today"]);
+  assert.equal(puts.length, 3);
+  assert.ok(puts[0].url.includes("/contents/data/backups/"));
+  assert.ok(puts[0].url.endsWith(".json"));
+  assert.ok(puts[1].url.endsWith("/contents/data/latest.json"));
+  assert.ok(puts[2].url.endsWith("/contents/data/history/2026-10-24.json"));
+  assert.equal(puts[1].body.sha, undefined);
+  assert.equal(puts[1].body.branch, "main");
+  assert.equal(puts[1].auth, "Bearer test-token-not-real");
+  const decoded = JSON.parse(base64ToUtf8(puts[1].body.content));
+  const backup = JSON.parse(base64ToUtf8(puts[0].body.content));
+  assert.equal(backup.today.day.weight, 174.4);
+  assert.equal(JSON.stringify(backup).includes("test-token-not-real"), false);
+  assert.deepEqual(Object.keys(decoded), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts"]);
   assert.equal(decoded.recipes[0].name, "Café oats");
   assert.equal(decoded.token, undefined);
   assert.equal(decoded.photo, undefined);
@@ -200,14 +239,16 @@ test("writes latest.json and today's snapshot, creating files when they are miss
   assert.equal(calls.every((c) => !c.url.includes("test-token-not-real")), true);
 });
 
-test("sends the existing sha when updating", async () => {
+test("sends the existing sha when updating latest and does not modify a history file", async () => {
   setup();
   const { calls } = installHappyFetch({ latestSha: "abc123", historySha: "hist1" });
   const result = await syncNow();
   assert.equal(result.ok, true);
   const puts = calls.filter((c) => c.method === "PUT");
-  assert.equal(puts[0].body.sha, "abc123");
-  assert.equal(puts[1].body.sha, "hist1");
+  const latest = puts.find((c) => c.url.includes("data/latest.json"));
+  assert.equal(latest.body.sha, "abc123");
+  assert.equal(puts.some((c) => c.url.includes("data/history/")), false);
+  assert.equal(calls.some((c) => c.method === "DELETE"), false);
 });
 
 test("on 409, refetches the sha and overwrites with local data", async () => {
@@ -252,7 +293,7 @@ test("offline marks pending, does not call GitHub, and a later retry uploads", a
   const again = await syncNow();
   assert.equal(again.ok, true);
   assert.equal(loadSyncStatus().pending, false);
-  assert.equal(calls.filter((c) => c.method === "PUT").length, 2);
+  assert.equal(calls.filter((c) => c.method === "PUT").length, 3);
 });
 
 test("a network failure stays pending and does not throw", async () => {
@@ -272,7 +313,7 @@ test("debounced schedule collapses to one upload", async () => {
   scheduleSync();
   scheduleSync();
   await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.equal(calls.filter((c) => c.method === "PUT").length, 2);
+  assert.equal(calls.filter((c) => c.method === "PUT").length, 3);
 });
 
 test("does nothing when no token is saved", async () => {
@@ -301,7 +342,7 @@ test("disconnect removes the token from storage", () => {
 
 test("payload keeps the export shape and drops anything else", () => {
   const payload = payloadForUpload(samplePayload());
-  assert.deepEqual(Object.keys(payload), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today"]);
+  assert.deepEqual(Object.keys(payload), ["exportedAt", "targets", "meta", "history", "recipes", "bodyComp", "measurements", "milestones", "mealTypes", "supplementGroups", "supplementRules", "workoutDays", "weeklyWorkoutTarget", "today", "days", "deleted", "conflicts"]);
   assert.equal(JSON.stringify(payload).includes("secret-photo"), false);
   assert.equal(JSON.stringify(payload).includes("should-never-upload"), false);
 });
@@ -323,6 +364,127 @@ test("an auth failure is not retried automatically as pending", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.pending, false);
   assert.match(result.message, /token/i);
+});
+
+test("a failed remote read keeps local data and still uploads this phone", async () => {
+  setup();
+  const payload = samplePayload();
+  registerPayloadGetter(() => payload);
+  let applied = 0;
+  registerMergeApplier(() => { applied += 1; });
+  let latestGets = 0;
+  const { calls } = installHappyFetch({
+    onGet(path) {
+      if (path !== LATEST_PATH) return null;
+      latestGets += 1;
+      if (latestGets === 1) return json(500, { message: "unavailable" });
+      return null;
+    },
+  });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  assert.equal(applied, 0);
+  assert.equal(payload.history.length, 1);
+  const latest = calls.find((c) => c.method === "PUT" && c.url.includes("data/latest.json"));
+  const decoded = JSON.parse(base64ToUtf8(latest.body.content));
+  assert.equal(decoded.history[0].date, "2026-10-23");
+  assert.equal(calls.some((c) => c.method === "DELETE"), false);
+});
+
+test("invalid remote JSON does not change local data and uploads this phone", async () => {
+  setup();
+  const payload = samplePayload();
+  registerPayloadGetter(() => payload);
+  let applied = 0;
+  registerMergeApplier(() => { applied += 1; });
+  const { calls } = installHappyFetch({ latestSha: "abc123", latestText: "not-json{" });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  assert.equal(applied, 0);
+  assert.equal(payload.recipes[0].name, "Café oats");
+  const latest = calls.find((c) => c.method === "PUT" && c.url.includes("data/latest.json"));
+  const decoded = JSON.parse(base64ToUtf8(latest.body.content));
+  assert.equal(decoded.recipes[0].name, "Café oats");
+  assert.equal(decoded.remote, undefined);
+});
+
+test("merges a remote entry into the upload and the local applier", async () => {
+  setup();
+  let applied = null;
+  registerMergeApplier(async (doc) => { applied = doc; });
+  const remote = {
+    history: [{ date: "2026-01-02", calories: 100, protein: 1, carbs: 2, fat: 1, fiber: 1, weight: 150, water: 0, steps: null, workoutDone: false }],
+    recipes: [{ id: "recipe-remote", name: "Example stew", calories: 80, protein: 4, carbs: 6, fat: 2, fiber: 1 }],
+  };
+  const { calls } = installHappyFetch({ latestSha: "remote-sha", latestText: `${JSON.stringify(remote)}\n` });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  assert.ok(applied);
+  assert.ok(applied.history.some((row) => row.date === "2026-10-23"));
+  assert.ok(applied.history.some((row) => row.date === "2026-01-02" && row.weight === 150));
+  assert.ok(applied.recipes.some((row) => row.name === "Café oats"));
+  assert.ok(applied.recipes.some((row) => row.name === "Example stew"));
+  const latest = calls.find((c) => c.method === "PUT" && c.url.includes("data/latest.json"));
+  const decoded = JSON.parse(base64ToUtf8(latest.body.content));
+  assert.ok(decoded.history.some((row) => row.date === "2026-01-02"));
+  assert.ok(decoded.recipes.some((row) => row.id === "recipe-remote"));
+  assert.equal(calls.some((c) => c.method === "DELETE" && c.url.includes("data/history/")), false);
+});
+
+test("imports an inbox file once, then marks it processed", async () => {
+  setup();
+  let applied = null;
+  registerMergeApplier(async (doc) => { applied = doc; });
+  const inboxBody = JSON.stringify({
+    id: "batch-example",
+    entries: [{
+      type: "food",
+      date: "2026-01-04",
+      id: "food-example",
+      name: "Example oats",
+      calories: 120,
+      protein: 5,
+      carbs: 20,
+      fat: 2,
+      fiber: 3,
+      updatedAt: "2026-01-04T08:00:00.000Z",
+    }],
+  });
+  const { calls } = installHappyFetch({
+    inbox: [{ name: "example.json", path: "data/inbox/example.json", type: "file", sha: "in1" }],
+    inboxFiles: { "data/inbox/example.json": { sha: "in1", text: inboxBody } },
+  });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  const foods = applied.days.find((day) => day.date === "2026-01-04").day.foods;
+  assert.equal(foods.some((food) => food.id === "food-example"), true);
+  assert.ok(calls.some((c) => c.method === "PUT" && c.url.includes("data/inbox/processed/example.json")));
+  assert.ok(calls.some((c) => c.method === "DELETE" && c.url.includes("data/inbox/example.json")));
+  assert.equal(calls.some((c) => c.method === "DELETE" && c.url.includes("data/history/")), false);
+});
+
+test("keeps the first on-phone safety backup when sync runs again", async () => {
+  setup();
+  installHappyFetch();
+  await syncNow();
+  const first = loadPreTwoWayBackup();
+  assert.equal(first.includes(PRE_TWO_WAY_BACKUP_KEY), false);
+  assert.ok(first.includes("Café oats"));
+  registerPayloadGetter(() => ({ ...samplePayload(), recipes: [{ id: "2", name: "Example stew", calories: 10 }] }));
+  await syncNow();
+  assert.equal(loadPreTwoWayBackup(), first);
+});
+
+test("a tombstone removes a recipe from the merge without dropping it from conflicts", async () => {
+  setup();
+  recordTombstone({ collection: "recipes", id: "1", deletedAt: "2026-12-01T00:00:00.000Z" });
+  const { calls } = installHappyFetch({ latestSha: "remote-sha", latestText: `${JSON.stringify(samplePayload())}\n` });
+  const result = await syncNow();
+  assert.equal(result.ok, true);
+  const decoded = JSON.parse(base64ToUtf8(calls.find((c) => c.method === "PUT" && c.url.includes("data/latest.json")).body.content));
+  assert.equal(decoded.recipes.some((recipe) => recipe.id === "1"), false);
+  assert.equal(decoded.deleted.some((tomb) => tomb.collection === "recipes" && tomb.id === "1"), true);
+  assert.equal(decoded.conflicts.some((item) => item.collection === "recipes" && item.reason === "deleted"), true);
 });
 
 function walk(dir, out = []) {
