@@ -12,6 +12,7 @@ import {
   DEFAULT_REPO, DEFAULT_BRANCH, loadSyncConfig, loadSyncStatus, saveSyncConfig, clearSyncToken,
   registerPayloadGetter, subscribeSyncStatus, scheduleSync, syncNow, testConnection, installSyncRetries,
   registerMergeApplier, registerSafetyBackupHandler, recordTombstone, forgetTombstone, loadPreTwoWayBackup,
+  loadSyncReport,
 } from "./githubSync.js";
 import {
   DEFAULT_TARGETS,
@@ -368,6 +369,27 @@ function shortDate(ds) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+function describeSyncLine(report, status) {
+  if (status && status.state === "syncing") return { bad: false, text: "Syncing…" };
+  if (!report) {
+    if (status && status.pending) return { bad: true, text: "Sync waiting to retry" };
+    if (status && status.lastSyncedAt) return { bad: status.state === "error", text: `Last sync ${formatSyncTime(status.lastSyncedAt)}` };
+    return null;
+  }
+  const when = formatSyncTime(report.at || (status && status.lastSyncedAt));
+  if (report.partial) {
+    return { bad: true, text: ["Partial sync", report.problem || "Inbox file not moved", when, report.imported].filter(Boolean).join(" · ") };
+  }
+  if (!report.ok) {
+    return { bad: true, text: ["Sync failed", report.problem || "Upload failed", report.imported].filter(Boolean).join(" · ") };
+  }
+  return { bad: false, text: [`Synced${when ? ` ${when}` : ""}`, report.imported].filter(Boolean).join(" · ") };
+}
+function formatMeasure(value) {
+  if (!Number.isFinite(value)) return "—";
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
 
 // UI preference only. Not a data key, and not included in backups or sync.
 const LOG_RECIPES_OPEN_KEY = "macroConsole.ui.logRecipesOpen";
@@ -382,6 +404,60 @@ function writeLogRecipesOpen(open) {
   try {
     localStorage.setItem(LOG_RECIPES_OPEN_KEY, open ? "1" : "0");
   } catch (e) {}
+}
+const BODY_EXTRAS_OPEN_KEY = "macroConsole.ui.bodyExtrasOpen";
+const LOG_MEALS_OPEN_KEY = "macroConsole.ui.logMealsOpen";
+function readUiFlag(key) {
+  try { return localStorage.getItem(key) === "1"; } catch (e) { return false; }
+}
+function writeUiFlag(key, open) {
+  try { localStorage.setItem(key, open ? "1" : "0"); } catch (e) {}
+}
+function readMealOpenMap() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(LOG_MEALS_OPEN_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+}
+function writeMealOpenMap(map) {
+  try { localStorage.setItem(LOG_MEALS_OPEN_KEY, JSON.stringify(map)); } catch (e) {}
+}
+function foodMealName(food, recipes) {
+  if (food && typeof food.mealType === "string" && food.mealType.trim()) return food.mealType.trim();
+  const raw = String((food && food.name) || "").replace(/\s*\(\d+(?:\.\d+)?x\)$/i, "").trim().toLowerCase();
+  if (!raw) return "Other";
+  const recipe = (recipes || []).find((item) => item && item.name && String(item.name).trim().toLowerCase() === raw);
+  return (recipe && recipe.mealType) || "Other";
+}
+function groupLogFoods(foods, mealTypes, recipes) {
+  const groups = new Map();
+  for (const food of foods || []) {
+    const name = foodMealName(food, recipes);
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(food);
+  }
+  const preferred = [...(mealTypes || []), "Other"];
+  const names = [
+    ...preferred.filter((name) => groups.has(name)),
+    ...[...groups.keys()].filter((name) => !preferred.includes(name)),
+  ];
+  return names.map((name) => {
+    const items = groups.get(name);
+    const calories = items.reduce((sum, food) => sum + (Number(food.calories) || 0), 0);
+    const protein = items.reduce((sum, food) => sum + (Number(food.protein) || 0), 0);
+    return { name, foods: items, calories, protein };
+  });
+}
+function latestReading(entries, key) {
+  const rows = (entries || []).filter((entry) => entry && entry[key] != null && entry[key] !== "" && Number.isFinite(Number(entry[key])));
+  rows.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!rows.length) return null;
+  const latest = Number(rows[rows.length - 1][key]);
+  const previous = rows.length > 1 ? Number(rows[rows.length - 2][key]) : null;
+  const delta = previous == null ? null : Math.round((latest - previous) * 10) / 10;
+  return { value: latest, delta };
 }
 function downloadJsonFile(filename, text) {
   try {
@@ -1009,7 +1085,7 @@ export default function MacroConsole() {
   const [history, setHistory] = useState([]);
   const [dateStr, setDateStr] = useState(todayStr());
   const [dayData, setDayData] = useState(emptyDay());
-  const [foodForm, setFoodForm] = useState({ name: "", calories: "", protein: "", carbs: "", fat: "", fiber: "" });
+  const [foodForm, setFoodForm] = useState({ name: "", calories: "", protein: "", carbs: "", fat: "", fiber: "", mealType: "" });
   const [recipes, setRecipes] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [showRecipeManager, setShowRecipeManager] = useState(false);
@@ -1018,6 +1094,8 @@ export default function MacroConsole() {
   const [recipeForm, setRecipeForm] = useState(emptyRecipeForm());
   const [recipeBookQuery, setRecipeBookQuery] = useState("");
   const [logRecipesOpen, setLogRecipesOpen] = useState(readLogRecipesOpen);
+  const [bodyExtrasOpen, setBodyExtrasOpen] = useState(() => readUiFlag(BODY_EXTRAS_OPEN_KEY));
+  const [openMeals, setOpenMeals] = useState(readMealOpenMap);
   const [expandedRecipeId, setExpandedRecipeId] = useState(null);
   const [collapsedSections, setCollapsedSections] = useState({});
   const [othersHidden, setOthersHidden] = useState(false);
@@ -1089,6 +1167,7 @@ export default function MacroConsole() {
   const [syncTokenInput, setSyncTokenInput] = useState("");
   const [syncHasToken, setSyncHasToken] = useState(() => loadSyncConfig().hasToken);
   const [syncStatus, setSyncStatus] = useState(() => loadSyncStatus());
+  const [syncReport, setSyncReport] = useState(() => loadSyncReport());
   const [syncBusy, setSyncBusy] = useState("");
   const [undoAction, setUndoAction] = useState(null);
   const toastTimer = useRef(null);
@@ -1147,7 +1226,10 @@ export default function MacroConsole() {
     registerPayloadGetter(() => (syncPayloadRef.current ? syncPayloadRef.current() : null));
     registerMergeApplier((merged, extra) => applyMergedRef.current(merged, extra));
     registerSafetyBackupHandler((info) => safetyBackupRef.current(info));
-    const unsubscribe = subscribeSyncStatus(setSyncStatus);
+    const unsubscribe = subscribeSyncStatus((status) => {
+      setSyncStatus(status);
+      setSyncReport(loadSyncReport());
+    });
     const uninstallRetries = installSyncRetries();
     return () => {
       unsubscribe();
@@ -1393,10 +1475,11 @@ export default function MacroConsole() {
       calories: Number(foodForm.calories) || 0, protein: Number(foodForm.protein) || 0,
       carbs: Number(foodForm.carbs) || 0, fat: Number(foodForm.fat) || 0, fiber: Number(foodForm.fiber) || 0,
     };
+    if (foodForm.mealType) item.mealType = foodForm.mealType;
     const newDay = { ...dayData, foods: [...dayData.foods, item] };
     setDayData(newDay);
     persist(newDay);
-    setFoodForm({ name: "", calories: "", protein: "", carbs: "", fat: "", fiber: "" });
+    setFoodForm({ name: "", calories: "", protein: "", carbs: "", fat: "", fiber: "", mealType: foodForm.mealType || "" });
     setShowSuggestions(false);
   }
 
@@ -1993,7 +2076,8 @@ export default function MacroConsole() {
   }
 
   function selectRecipe(r) {
-    setFoodForm({ name: r.name, calories: String(r.calories), protein: String(r.protein), carbs: String(r.carbs), fat: String(r.fat), fiber: String(r.fiber) });
+    setFoodForm({ name: r.name, calories: String(r.calories), protein: String(r.protein), carbs: String(r.carbs), fat: String(r.fat), fiber: String(r.fiber), mealType: r.mealType || "" });
+    setManualEntryOpen(true);
     setShowSuggestions(false);
   }
 
@@ -2118,6 +2202,7 @@ export default function MacroConsole() {
       calories: Math.round(r.calories * mult), protein: Math.round(r.protein * mult),
       carbs: Math.round(r.carbs * mult), fat: Math.round(r.fat * mult), fiber: Math.round(r.fiber * mult),
     };
+    if (r.mealType) item.mealType = r.mealType;
     const newDay = { ...dayData, foods: [...dayData.foods, item] };
     setDayData(newDay);
     persist(newDay);
@@ -3154,6 +3239,26 @@ export default function MacroConsole() {
           </button>
         </div>
 
+        {(() => {
+          const syncLine = describeSyncLine(syncReport, syncStatus);
+          if (!syncLine) return null;
+          return (
+            <div
+              role="status"
+              className="font-mono mb-3 rounded-lg px-3 py-2"
+              style={{
+                fontSize: 12,
+                lineHeight: 1.35,
+                color: syncLine.bad ? palette.alert : palette.textMuted,
+                background: palette.panel,
+                border: `1px solid ${syncLine.bad ? palette.alert : palette.border}`,
+              }}
+            >
+              {syncLine.text}
+            </div>
+          );
+        })()}
+
         {view === "console" && (
         <>
         {/* Date nav */}
@@ -3500,6 +3605,28 @@ export default function MacroConsole() {
                     <NumInput value={foodForm.fat} onChange={(v) => setFoodForm({ ...foodForm, fat: v })} placeholder="F" wide />
                     <NumInput value={foodForm.fiber} onChange={(v) => setFoodForm({ ...foodForm, fiber: v })} placeholder="Fi" wide />
                   </div>
+                  {mealTypes.length > 0 && (
+                    <div className="flex gap-1 mb-2 flex-wrap">
+                      {mealTypes.map((meal) => (
+                        <button
+                          key={meal}
+                          type="button"
+                          onClick={() => setFoodForm({ ...foodForm, mealType: foodForm.mealType === meal ? "" : meal })}
+                          className="font-display uppercase rounded-lg px-2 py-1"
+                          style={{
+                            fontSize: 10,
+                            letterSpacing: "0.04em",
+                            minHeight: 32,
+                            background: foodForm.mealType === meal ? palette.amber : "transparent",
+                            color: foodForm.mealType === meal ? "#1B1815" : palette.textMuted,
+                            border: `1px solid ${foodForm.mealType === meal ? palette.amber : palette.border}`,
+                          }}
+                        >
+                          {meal}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex items-center justify-between gap-2">
                     <Button onClick={addFood} grow>
                       <span className="flex items-center justify-center gap-1"><Plus size={14} /> Log item</span>
@@ -3532,8 +3659,39 @@ export default function MacroConsole() {
               )}
 
               {dayData.foods.length > 0 ? (
-                <div className="space-y-1 max-h-56 overflow-y-auto">
-                  {dayData.foods.map((f) => {
+                <div className="space-y-2">
+                  {groupLogFoods(dayData.foods, mealTypes, recipes).map((group) => {
+                    const mealOpen = !!openMeals[group.name];
+                    return (
+                      <div key={group.name}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = { ...openMeals, [group.name]: !mealOpen };
+                            setOpenMeals(next);
+                            writeMealOpenMap(next);
+                          }}
+                          aria-expanded={mealOpen}
+                          className="w-full flex items-center justify-between gap-2 rounded-lg px-2 text-left"
+                          style={{ minHeight: 44, background: palette.panelAlt, border: `1px solid ${palette.border}` }}
+                        >
+                          <span className="min-w-0">
+                            <span className="font-display uppercase block" style={{ color: palette.text, fontSize: 13, letterSpacing: "0.04em" }}>{group.name}</span>
+                            <span className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>{Math.round(group.calories)} kcal · {Math.round(group.protein)}g protein</span>
+                          </span>
+                          <ChevronDown size={16} style={{ color: palette.textFaint, transform: mealOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
+                        </button>
+                        {mealOpen && (
+                          <div className="space-y-1 mt-1">
+                            <button
+                              type="button"
+                              onClick={() => { setFoodForm({ ...foodForm, mealType: group.name === "Other" ? "" : group.name }); setManualEntryOpen(true); }}
+                              className="font-mono px-2 py-1"
+                              style={{ color: palette.amber, fontSize: 11 }}
+                            >
+                              Add to {group.name}
+                            </button>
+                  {group.foods.map((f) => {
                     const hasComponents = f.components && f.components.length > 0;
                     const isExpanded = expandedFoodId === f.id;
                     return (
@@ -3576,6 +3734,11 @@ export default function MacroConsole() {
                                 </div>
                               ))}
                             </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                           </div>
                         )}
                       </div>
@@ -3865,6 +4028,65 @@ export default function MacroConsole() {
             </div>
             {progressSubView === "body" && (
             <>
+            <Panel className="mb-3">
+              <Label>Latest</Label>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                {[
+                  ["Weight", latestReading(bodyComp, "weight"), "lb", false],
+                  ["Body fat", latestReading(bodyComp, "bodyFatPct"), "%", false],
+                  ["Muscle", latestReading(bodyComp, "muscleMass"), "lb", true],
+                  ["Waist", latestReading(measurements, "waist"), "cm", false],
+                ].map(([label, reading, unit, higherIsBetter]) => {
+                  const delta = reading && reading.delta;
+                  const arrow = delta == null ? "" : delta > 0 ? "▲" : delta < 0 ? "▼" : "–";
+                  const good = delta == null || delta === 0 ? null : higherIsBetter ? delta > 0 : delta < 0;
+                  const deltaColor = good == null ? palette.textMuted : good ? palette.olive : palette.rust;
+                  return (
+                    <div key={label} className="rounded-lg px-2 py-2" style={{ background: palette.panelAlt, minHeight: 64 }}>
+                      <div className="font-display uppercase" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.05em" }}>{label}</div>
+                      <div className="font-mono" style={{ color: palette.text, fontSize: 18, lineHeight: 1.2 }}>
+                        {reading ? formatMeasure(reading.value) : "—"}
+                        {reading ? <span style={{ color: palette.textFaint, fontSize: 11 }}>{` ${unit}`}</span> : null}
+                      </div>
+                      <div className="font-mono" style={{ color: deltaColor, fontSize: 11, minHeight: 16 }}>
+                        {delta == null ? "" : `${arrow} ${delta > 0 ? "+" : ""}${formatMeasure(delta)}`}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !bodyExtrasOpen;
+                  setBodyExtrasOpen(next);
+                  writeUiFlag(BODY_EXTRAS_OPEN_KEY, next);
+                }}
+                aria-expanded={bodyExtrasOpen}
+                className="w-full flex items-center justify-between rounded-lg px-2 mt-2 font-display uppercase"
+                style={{ minHeight: 44, color: palette.text, letterSpacing: "0.04em", fontSize: 12, border: `1px solid ${palette.border}` }}
+              >
+                <span>{bodyExtrasOpen ? "Hide details" : "Show details"}</span>
+                <ChevronDown size={16} style={{ color: palette.textFaint, transform: bodyExtrasOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s ease" }} />
+              </button>
+              {bodyExtrasOpen && (() => {
+                const scans = [...bodyComp].filter((entry) => entry && entry.date).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+                const latest = scans[scans.length - 1];
+                const extras = latest ? BC_FIELDS.filter(([key]) => !["weight", "bodyFatPct", "muscleMass"].includes(key) && latest[key] != null && latest[key] !== "") : [];
+                if (!latest || extras.length === 0) {
+                  return <div className="font-mono mt-2" style={{ color: palette.textFaint, fontSize: 12 }}>No other readings on the latest scan.</div>;
+                }
+                return (
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-1 mt-2">
+                    {extras.map(([key, lbl, unit]) => (
+                      <div key={key} className="font-mono" style={{ color: palette.textMuted, fontSize: 12 }}>
+                        {lbl}: <span style={{ color: palette.text }}>{latest[key]}{unit}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </Panel>
             <div className="flex gap-1 mb-4">
               {[["7", "7D"], ["14", "14D"], ["30", "30D"], ["all", "All"]].map(([val, lbl]) => (
                 <Button key={val} onClick={() => setStatsPeriod(val)} variant={statsPeriod === val ? "primary" : "ghost"} size="sm" grow>
