@@ -368,6 +368,21 @@ function shortDate(ds) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
+
+// UI preference only. Not a data key, and not included in backups or sync.
+const LOG_RECIPES_OPEN_KEY = "macroConsole.ui.logRecipesOpen";
+function readLogRecipesOpen() {
+  try {
+    return localStorage.getItem(LOG_RECIPES_OPEN_KEY) === "1";
+  } catch (e) {
+    return false;
+  }
+}
+function writeLogRecipesOpen(open) {
+  try {
+    localStorage.setItem(LOG_RECIPES_OPEN_KEY, open ? "1" : "0");
+  } catch (e) {}
+}
 function downloadJsonFile(filename, text) {
   try {
     const blob = new Blob([text], { type: "application/json" });
@@ -1002,6 +1017,7 @@ export default function MacroConsole() {
   const [recipeModalOpen, setRecipeModalOpen] = useState(false);
   const [recipeForm, setRecipeForm] = useState(emptyRecipeForm());
   const [recipeBookQuery, setRecipeBookQuery] = useState("");
+  const [logRecipesOpen, setLogRecipesOpen] = useState(readLogRecipesOpen);
   const [expandedRecipeId, setExpandedRecipeId] = useState(null);
   const [collapsedSections, setCollapsedSections] = useState({});
   const [othersHidden, setOthersHidden] = useState(false);
@@ -3582,8 +3598,31 @@ export default function MacroConsole() {
             )}
 
             <div className="mt-2 pt-4 border-t" style={{ borderColor: palette.border }}>
-              <Label>Recipe book</Label>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !logRecipesOpen;
+                  setLogRecipesOpen(next);
+                  writeLogRecipesOpen(next);
+                }}
+                aria-expanded={logRecipesOpen}
+                aria-controls="log-recipe-book"
+                className="w-full flex items-center justify-between gap-3 rounded-lg px-3 font-display uppercase"
+                style={{
+                  minHeight: 48,
+                  letterSpacing: "0.06em",
+                  fontSize: 13,
+                  background: palette.panel,
+                  color: palette.text,
+                  border: `1px solid ${palette.border}`,
+                }}
+              >
+                <span>{logRecipesOpen ? "Hide recipes" : "Show recipes"}</span>
+                <ChevronDown size={16} style={{ color: palette.textFaint, transform: logRecipesOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
+              </button>
             </div>
+            {logRecipesOpen && (
+            <div id="log-recipe-book" className="mt-3">
             <input
               type="text" placeholder="Search recipes" value={recipeBookQuery}
               onChange={(e) => setRecipeBookQuery(e.target.value)}
@@ -3640,6 +3679,8 @@ export default function MacroConsole() {
               });
               return <>{sections}</>;
             })()}
+            </div>
+            )}
             <div className="mt-6 pt-4 border-t" style={{ borderColor: palette.border }} />
 
             {!AI_ENABLED ? (
