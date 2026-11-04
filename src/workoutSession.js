@@ -211,3 +211,61 @@ export function recommendationText(ex, agreedWeightLb) {
   if (raw) return `Recommended: ${raw}`;
   return "";
 }
+
+function positiveAmount(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Volume is weight × reps for loaded sets. A set with reps and no weight is
+// treated as bodyweight and left out of the lb total.
+export function workoutSummary({ sessionEntries, priorEntries, exercises, overrides }) {
+  const session = Array.isArray(sessionEntries) ? sessionEntries : [];
+  const prior = Array.isArray(priorEntries) ? priorEntries : [];
+  let volume = 0;
+  let bodyweightSets = 0;
+  for (const entry of session) {
+    const weight = positiveAmount(entry && entry.weight);
+    const reps = positiveAmount(entry && entry.reps);
+    if (weight != null && reps != null) volume += weight * reps;
+    else if (weight == null && reps != null) bodyweightSets += 1;
+  }
+  const names = [];
+  for (const entry of session) {
+    const name = entry && entry.exercise;
+    if (name && !names.includes(name)) names.push(name);
+  }
+  const bests = [];
+  for (const name of names) {
+    const mine = session.filter((entry) => entry.exercise === name);
+    const older = prior.filter((entry) => entry.exercise === name);
+    const myWeights = mine.map((entry) => positiveAmount(entry.weight)).filter((weight) => weight != null);
+    const oldWeights = older.map((entry) => positiveAmount(entry.weight)).filter((weight) => weight != null);
+    if (myWeights.length && oldWeights.length && Math.max(...myWeights) > Math.max(...oldWeights)) {
+      bests.push({ exercise: name, kind: "weight", text: `${name} — heaviest, ${formatCount(Math.max(...myWeights))} lb` });
+    }
+    for (const weight of [...new Set(myWeights)]) {
+      const myReps = mine.filter((entry) => positiveAmount(entry.weight) === weight).map((entry) => positiveAmount(entry.reps)).filter((reps) => reps != null);
+      const oldReps = older.filter((entry) => positiveAmount(entry.weight) === weight).map((entry) => positiveAmount(entry.reps)).filter((reps) => reps != null);
+      if (!myReps.length || !oldReps.length) continue;
+      const best = Math.max(...myReps);
+      if (best > Math.max(...oldReps)) {
+        bests.push({ exercise: name, kind: "reps", text: `${name} — ${formatCount(best)} reps at ${formatCount(weight)} lb` });
+      }
+    }
+  }
+  const byName = new Map();
+  for (const ex of exercises || []) {
+    if (ex && ex.name && !byName.has(ex.name)) byName.set(ex.name, ex);
+  }
+  const next = names.map((name) => {
+    const ex = byName.get(name) || { name, sets: "", startWeight: "" };
+    return { name, text: recommendationText(ex, overrides && overrides[name]) };
+  });
+  return {
+    volume: Math.round(volume * 10) / 10,
+    bodyweightSets,
+    bests,
+    next,
+  };
+}

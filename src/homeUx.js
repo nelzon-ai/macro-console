@@ -54,6 +54,32 @@ export function decrementPortion(recipe) {
   };
 }
 
+// Linear protein pace across the waking day. Hours are local time, 0–24.
+export const PROTEIN_PACE_START_HOUR = 7;
+export const PROTEIN_PACE_END_HOUR = 21;
+
+export function proteinPace({ protein, target, hour, minute = 0, startHour = PROTEIN_PACE_START_HOUR, endHour = PROTEIN_PACE_END_HOUR }) {
+  const goal = Number(target);
+  const eaten = Number(protein) || 0;
+  if (!(goal > 0) || !Number.isFinite(hour)) return null;
+  const start = startHour * 60;
+  const end = endHour * 60;
+  const now = hour * 60 + (Number(minute) || 0);
+  let fraction = 0;
+  if (end > start) {
+    if (now >= end) fraction = 1;
+    else if (now > start) fraction = (now - start) / (end - start);
+  }
+  const expected = Math.round(goal * fraction);
+  const behind = Math.max(0, expected - Math.round(eaten));
+  return {
+    expected,
+    markerPercent: Math.round(fraction * 100),
+    behind,
+    label: behind > 0 ? `${behind}g behind pace` : "On pace",
+  };
+}
+
 export function batchFieldsFromForm(raw, previous) {
   const text = String(raw == null ? "" : raw).trim();
   if (!text) return { batchPortions: null, portionsLeft: null };
