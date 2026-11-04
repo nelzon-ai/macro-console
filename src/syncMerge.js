@@ -1004,7 +1004,7 @@ export function documentFromInbox(inbox, now) {
     }
     if (entry.type === "recipe") {
       if (!String(entry.name || "").trim() && !entry.id) continue;
-      doc.recipes.push({
+      const recipe = {
         id: entry.id || undefined,
         name: String(entry.name || "").trim(),
         servings: Number(entry.servings) || 1,
@@ -1017,7 +1017,14 @@ export function documentFromInbox(inbox, now) {
         method: entry.method || "",
         mealType: entry.mealType || "Uncategorized",
         updatedAt: stamp,
-      });
+      };
+      const batchPortions = Number(entry.batchPortions);
+      if (Number.isFinite(batchPortions) && batchPortions > 0) {
+        recipe.batchPortions = Math.round(batchPortions);
+        const portionsLeft = Number(entry.portionsLeft);
+        recipe.portionsLeft = Number.isFinite(portionsLeft) ? Math.max(0, Math.round(portionsLeft)) : recipe.batchPortions;
+      }
+      doc.recipes.push(recipe);
     }
   }
   return { document: doc, settings, workoutPlan };

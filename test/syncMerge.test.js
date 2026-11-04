@@ -198,6 +198,16 @@ test("inbox entries union with local rows and a settings patch stays explicit", 
   assert.equal(merged.document.measurements[0].waist, 80);
   assert.equal(merged.document.bodyComp[0].bodyFatPct, 20);
   assert.equal(merged.document.recipes.some((item) => item.id === "recipe-remote"), true);
+  assert.equal(merged.document.recipes.find((item) => item.id === "recipe-remote").batchPortions, undefined);
+  const withBatch = mergeWithInbox(local, {}, [inboxFile("batch.json", [
+    { type: "food", date: "2026-01-03", id: "food-plain", name: "Example oats", calories: 100, protein: 5, carbs: 10, fat: 2, fiber: 1, updatedAt: NOW },
+    { type: "recipe", id: "recipe-chili", name: "Example chili", calories: 400, batchPortions: 4, portionsLeft: 2, updatedAt: NOW },
+  ])], NOW);
+  assert.equal(withBatch.document.days.find((rec) => rec.date === "2026-01-03").day.foods[0].name, "Example oats");
+  assert.equal(withBatch.document.days.find((rec) => rec.date === "2026-01-03").day.foods[0].batchPortions, undefined);
+  const chili = withBatch.document.recipes.find((item) => item.id === "recipe-chili");
+  assert.equal(chili.batchPortions, 4);
+  assert.equal(chili.portionsLeft, 2);
   assert.equal(merged.settings.targets.calories, 1800);
   assert.equal(merged.accepted.length, 1);
   const broken = mergeWithInbox(local, local, [{ name: "bad.json", body: "{nope" }], NOW);

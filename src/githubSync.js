@@ -1079,9 +1079,43 @@ function kick() {
   return running;
 }
 
+// What the status line should show. A queued or in-flight sync is not a failure,
+// and a later success replaces an older error. `tone` is ok, pending, error, or idle.
+export function syncIndicator(report, status) {
+  const state = (status && status.state) || "idle";
+  const waiting = state === "pending" || (status && status.pending && state !== "error");
+  if (state === "syncing") return { tone: "pending", text: "Syncing…" };
+  if (waiting) {
+    const offline = status && status.code === "offline" && status.message;
+    return { tone: "pending", text: offline || "Sync waiting to retry" };
+  }
+  if (state === "error") {
+    return { tone: "error", text: (status && status.message) || (report && report.problem) || "Sync failed" };
+  }
+  if (state === "synced" || (report && report.ok)) {
+    const note = report && report.partial ? (report.problem || "Inbox file not moved") : "";
+    const imported = report && report.ok && !report.partial && report.imported ? report.imported : "";
+    return { tone: "ok", text: ["Synced", note, imported].filter(Boolean).join(" · ") };
+  }
+  if (report && report.ok === false) {
+    return { tone: "error", text: ["Sync failed", report.problem].filter(Boolean).join(" · ") };
+  }
+  return { tone: "idle", text: "" };
+}
+
 export function scheduleSync() {
   if (!loadSyncConfig().token) return;
   if (timer) clearTimeout(timer);
+  const prev = loadSyncStatus();
+  if (prev.state !== "syncing") {
+    emit({
+      state: "pending",
+      pending: true,
+      code: prev.code === "offline" ? "offline" : "pending",
+      message: prev.code === "offline" && prev.message ? prev.message : "Sync waiting to retry",
+      lastSyncedAt: prev.lastSyncedAt,
+    });
+  }
   timer = setTimeout(() => {
     timer = null;
     void kick();

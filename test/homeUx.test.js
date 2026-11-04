@@ -1,0 +1,73 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  remainder,
+  swipeDayDelta,
+  portionsLeftLabel,
+  decrementPortion,
+  batchFieldsFromForm,
+} from "../src/homeUx.js";
+import { syncIndicator } from "../src/githubSync.js";
+
+test("remainder is what is left of the stored target", () => {
+  const calories = remainder(1620, 2000);
+  assert.equal(calories.amount, 380);
+  assert.equal(calories.over, false);
+  assert.equal(calories.percentLeft, 19);
+  const protein = remainder(150, 150);
+  assert.equal(protein.amount, 0);
+  assert.equal(protein.over, false);
+  const over = remainder(2100, 2000);
+  assert.equal(over.over, true);
+  assert.equal(over.amount, 100);
+  assert.equal(over.percentLeft, 0);
+});
+
+test("horizontal swipes change the day and vertical drags do not", () => {
+  assert.equal(swipeDayDelta(-80, 10), 1);
+  assert.equal(swipeDayDelta(80, 4), -1);
+  assert.equal(swipeDayDelta(-20, 0), 0);
+  assert.equal(swipeDayDelta(-40, 80), 0);
+});
+
+test("a batch shows portions left and logging one decrements it", () => {
+  const chili = { id: "chili", name: "Example chili", calories: 400, batchPortions: 4, portionsLeft: 4 };
+  assert.equal(portionsLeftLabel(chili), "4 of 4 portions left");
+  const once = decrementPortion(chili);
+  assert.equal(once.logged, true);
+  assert.equal(once.recipe.portionsLeft, 3);
+  assert.equal(once.recipe.calories, 400);
+  assert.equal(portionsLeftLabel(once.recipe), "3 of 4 portions left");
+  const empty = decrementPortion({ ...chili, portionsLeft: 0 });
+  assert.equal(empty.logged, false);
+  assert.equal(empty.recipe.portionsLeft, 0);
+  assert.equal(portionsLeftLabel({ name: "Oats", servings: 2 }), "");
+});
+
+test("editing a batch keeps portions already used", () => {
+  const fresh = batchFieldsFromForm("4", null);
+  assert.deepEqual(fresh, { batchPortions: 4, portionsLeft: 4 });
+  const kept = batchFieldsFromForm("4", { batchPortions: 4, portionsLeft: 2 });
+  assert.deepEqual(kept, { batchPortions: 4, portionsLeft: 2 });
+  const cleared = batchFieldsFromForm("", { batchPortions: 4, portionsLeft: 2 });
+  assert.deepEqual(cleared, { batchPortions: null, portionsLeft: null });
+});
+
+test("sync indicator is green when synced, amber while waiting, and red only on a real failure", () => {
+  assert.deepEqual(syncIndicator(null, { state: "idle", pending: false }), { tone: "idle", text: "" });
+  assert.equal(syncIndicator(null, { state: "pending", pending: true, code: "offline", message: "You're offline." }).tone, "pending");
+  assert.equal(syncIndicator({ ok: false, problem: "Latest upload failed" }, { state: "pending", pending: true, code: "network" }).tone, "pending");
+  assert.equal(syncIndicator({ ok: false, problem: "Latest upload failed" }, { state: "error", pending: false, message: "Paste a token first." }).tone, "error");
+  const synced = syncIndicator(
+    { ok: false, problem: "Daily snapshot failed", at: "2026-11-01T12:00:00.000Z" },
+    { state: "synced", pending: false, lastSyncedAt: "2026-11-04T12:00:00.000Z" },
+  );
+  assert.equal(synced.tone, "ok");
+  assert.match(synced.text, /^Synced/);
+  const partial = syncIndicator(
+    { ok: false, partial: true, problem: "Inbox file not moved" },
+    { state: "synced", pending: false },
+  );
+  assert.equal(partial.tone, "ok");
+  assert.match(partial.text, /Inbox file not moved/);
+});
