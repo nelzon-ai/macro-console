@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  MAIN_NAV,
   remainder,
   swipeDayDelta,
   portionsLeftLabel,
@@ -8,6 +9,16 @@ import {
   batchFieldsFromForm,
 } from "../src/homeUx.js";
 import { syncIndicator } from "../src/githubSync.js";
+
+test("every screen, including supplements, is on the bottom navigation", () => {
+  const views = MAIN_NAV.map((item) => item.view);
+  for (const view of ["console", "book", "workout", "progress", "supps"]) {
+    assert.ok(views.includes(view), `${view} is missing from navigation`);
+  }
+  assert.equal(new Set(views).size, views.length);
+  assert.equal(MAIN_NAV.find((item) => item.view === "supps").label, "Supps");
+  assert.ok(MAIN_NAV.every((item) => item.label && item.view));
+});
 
 test("remainder is what is left of the stored target", () => {
   const calories = remainder(1620, 2000);
