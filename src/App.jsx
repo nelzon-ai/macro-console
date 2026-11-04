@@ -1978,7 +1978,8 @@ export default function MacroConsole() {
       return;
     }
     nextIndexRef.current = nextIndex;
-    const restSeconds = sessionMode === "circuit" ? 20 : ((step && step.ex.rest) || 90);
+    const plannedRest = step && Number(step.ex.rest);
+    const restSeconds = plannedRest > 0 ? plannedRest : (sessionMode === "circuit" ? 20 : 90);
     setSessionPhase("resting");
     setRestRemaining(restSeconds);
     speak(sessionMode === "circuit" ? "Next up." : `Rest for ${restSeconds} seconds.`);
