@@ -9,6 +9,7 @@ import {
   setsLoggedToday,
   loggedSetDefaults,
   recommendationText,
+  workoutSummary,
 } from "../src/workoutSession.js";
 
 const day = {
@@ -126,6 +127,31 @@ test("a different set count falls back within the previous session", () => {
   assert.equal(loggedSetDefaults(press, [
     { exercise: "Press", date: "2026-02-01", weight: 70, reps: 5, setNumber: 2 },
   ], 1, "2026-02-08").weight, "70");
+});
+
+test("a finished session sums volume, spots bests, and keeps the plan", () => {
+  const press = { name: "Press", sets: "4×8-12", startWeight: "60" };
+  const before = JSON.stringify(press);
+  const summary = workoutSummary({
+    sessionEntries: [
+      { exercise: "Press", date: "2026-02-08", weight: 60, reps: 14, setNumber: 1 },
+      { exercise: "Press", date: "2026-02-08", weight: 70, reps: 8, setNumber: 2 },
+      { exercise: "Plank", date: "2026-02-08", reps: 30, setNumber: 1 },
+    ],
+    priorEntries: [
+      { exercise: "Press", date: "2026-02-01", weight: 60, reps: 12, setNumber: 1 },
+      { exercise: "Press", date: "2026-02-01", weight: 65, reps: 8, setNumber: 2 },
+    ],
+    exercises: [press],
+    overrides: { Press: 65 },
+  });
+  assert.equal(summary.volume, 60 * 14 + 70 * 8);
+  assert.equal(summary.bodyweightSets, 1);
+  assert.ok(summary.bests.some((best) => best.kind === "weight" && best.text.includes("70")));
+  assert.ok(summary.bests.some((best) => best.kind === "reps" && best.text.includes("14 reps at 60")));
+  assert.equal(summary.next[0].text, "Recommended: 4×8-12 @ 60 lb · next 65 lb");
+  assert.equal(JSON.stringify(press), before);
+  assert.equal(press.startWeight, "60");
 });
 
 test("recommendation line follows the plan and leaves bodyweight exercises alone", () => {
