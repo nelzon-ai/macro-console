@@ -1,5 +1,14 @@
 // Display helpers for the homepage. They do not write logs, plans, or sync state.
 
+// Every main screen. The bottom bar is the way to open each one, including supplements.
+export const MAIN_NAV = [
+  { view: "console", label: "Today" },
+  { view: "book", label: "Log" },
+  { view: "workout", label: "Workout" },
+  { view: "progress", label: "Progress" },
+  { view: "supps", label: "Supps" },
+];
+
 export function remainder(value, target) {
   const eaten = Number(value) || 0;
   const goal = Number(target) || 0;
