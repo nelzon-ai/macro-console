@@ -152,7 +152,7 @@ Other numeric fields the app already stores are accepted with the same names: `m
 
 ## Recipe
 
-A saved recipe, not a log for a specific day. Logging it onto a day is a separate `food` entry.
+A saved recipe, not a log for a specific day. Logging it onto a day is a separate `food` entry. Optional `batchPortions` and `portionsLeft` track a cooked batch. Leave them out and the recipe is unchanged. A `food` entry never needs them.
 
 ```json
 {

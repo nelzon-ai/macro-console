@@ -6,11 +6,11 @@ import {
 import {
   ChevronLeft, ChevronRight, ChevronDown, Settings, Flame, Scale, Droplets,
   Footprints, Dumbbell, Plus, Minus, X, Loader2, Lock, Unlock, BookOpen, LayoutDashboard,
-  TrendingUp, Copy, Send, Sparkles, Upload, Camera, Activity, Ruler, Pencil, BookmarkPlus, Images, Play, Pause, Check, Volume2, VolumeX, Pill, Cloud
+  TrendingUp, Copy, Send, Sparkles, Upload, Camera, Activity, Ruler, Pencil, BookmarkPlus, Images, Play, Pause, Check, Volume2, VolumeX, Cloud
 } from "lucide-react";
 import {
   DEFAULT_REPO, DEFAULT_BRANCH, loadSyncConfig, loadSyncStatus, saveSyncConfig, clearSyncToken,
-  registerPayloadGetter, subscribeSyncStatus, scheduleSync, syncNow, testConnection, installSyncRetries,
+  registerPayloadGetter, subscribeSyncStatus, scheduleSync, syncNow, syncIndicator, testConnection, installSyncRetries,
   registerMergeApplier, registerSafetyBackupHandler, recordTombstone, forgetTombstone, loadPreTwoWayBackup,
   loadSyncReport,
   loadLastWeeklyBackupDate,
@@ -25,6 +25,7 @@ import {
   recommendationText,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
+import { remainder, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -373,22 +374,14 @@ function shortDate(ds) {
 }
 function genId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 function describeSyncLine(report, status, weeklyBackupOn) {
+  const indicator = syncIndicator(report, status);
   const backup = weeklyBackupOn ? `Weekly backup ${shortDate(weeklyBackupOn)}` : "";
-  const withBackup = (text) => [text, backup].filter(Boolean).join(" · ");
-  if (status && status.state === "syncing") return { bad: false, text: withBackup("Syncing…") };
-  if (!report) {
-    if (status && status.pending) return { bad: true, text: withBackup("Sync waiting to retry") };
-    if (status && status.lastSyncedAt) return { bad: status.state === "error", text: withBackup(`Last sync ${formatSyncTime(status.lastSyncedAt)}`) };
-    return backup ? { bad: false, text: backup } : null;
-  }
-  const when = formatSyncTime(report.at || (status && status.lastSyncedAt));
-  if (report.partial) {
-    return { bad: true, text: withBackup(["Partial sync", report.problem || "Inbox file not moved", when, report.imported].filter(Boolean).join(" · ")) };
-  }
-  if (!report.ok) {
-    return { bad: true, text: withBackup(["Sync failed", report.problem || "Sync failed", report.imported].filter(Boolean).join(" · ")) };
-  }
-  return { bad: false, text: withBackup([`Synced${when ? ` ${when}` : ""}`, report.imported].filter(Boolean).join(" · ")) };
+  const when = formatSyncTime(status && status.lastSyncedAt);
+  if (indicator.tone === "idle") return backup ? { tone: "idle", text: backup } : null;
+  const text = indicator.tone === "ok"
+    ? [`Synced${when ? ` ${when}` : ""}`, indicator.text.replace(/^Synced\s*·?\s*/, ""), backup].filter(Boolean).join(" · ")
+    : [indicator.text, backup].filter(Boolean).join(" · ");
+  return { tone: indicator.tone, text };
 }
 function formatMeasure(value) {
   if (!Number.isFinite(value)) return "—";
@@ -532,7 +525,7 @@ function emptyIngredient() {
   };
 }
 function emptyRecipeForm() {
-  return { id: null, name: "", servings: "1", calories: "", protein: "", carbs: "", fat: "", fiber: "", ingredients: [emptyIngredient()], method: "", mealType: "Uncategorized" };
+  return { id: null, name: "", servings: "1", batchPortions: "", calories: "", protein: "", carbs: "", fat: "", fiber: "", ingredients: [emptyIngredient()], method: "", mealType: "Uncategorized" };
 }
 
 const PHOTO_ANGLES = ["Front", "Side", "Back"];
@@ -753,9 +746,10 @@ function Button({ children, onClick, variant = "primary", disabled, full, size =
   );
 }
 
-function RecipeCard({ recipe, expanded, onToggle, onEdit, onDelete, onLog, locked }) {
+function RecipeCard({ recipe, expanded, onToggle, onEdit, onDelete, onLog, onLogPortion, locked }) {
   const [logServings, setLogServings] = useState("1");
   const hasDetails = (recipe.ingredients && recipe.ingredients.length > 0) || recipe.method;
+  const batch = batchState(recipe);
   return (
     <div className="rounded-lg border overflow-hidden" style={{ borderColor: palette.border, background: palette.panelAlt }}>
       <button onClick={onToggle} className="w-full flex items-center justify-between px-3 py-2 text-left">
@@ -763,6 +757,7 @@ function RecipeCard({ recipe, expanded, onToggle, onEdit, onDelete, onLog, locke
           <div className="text-sm truncate" style={{ color: palette.text }}>{recipe.name}</div>
           <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>
             {recipe.calories} cal/serving · {recipe.servings || 1} serving{(recipe.servings || 1) === 1 ? "" : "s"}
+            {batch ? ` · ${portionsLeftLabel(recipe)}` : ""}
           </div>
         </div>
         <ChevronDown size={16} style={{ color: palette.textFaint, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
@@ -816,6 +811,12 @@ function RecipeCard({ recipe, expanded, onToggle, onEdit, onDelete, onLog, locke
               style={{ width: 56, background: palette.panel, borderColor: palette.border, color: palette.text }}
             />
           </div>
+          {batch && (
+            <div className="flex items-center justify-between gap-2 mb-2" style={{ flexWrap: "wrap" }}>
+              <span className="font-mono" style={{ color: batch.left > 0 ? palette.amber : palette.textFaint, fontSize: 11 }}>{portionsLeftLabel(recipe)}</span>
+              <Button onClick={onLogPortion} disabled={locked || batch.left <= 0} size="sm">Log a portion</Button>
+            </div>
+          )}
           <div className="flex gap-2 mt-1">
             <Button onClick={() => onLog(Number(logServings) || 1)} disabled={locked} size="sm" grow>Log</Button>
             <Button onClick={onEdit} variant="ghost" size="sm" grow>Edit</Button>
@@ -1172,6 +1173,9 @@ export default function MacroConsole() {
   });
   const [clockTick, setClockTick] = useState(0);
   const [syncBusy, setSyncBusy] = useState("");
+  const [quickRest, setQuickRest] = useState(null);
+  const quickRestRef = useRef(null);
+  const swipeRef = useRef(null);
   const [undoAction, setUndoAction] = useState(null);
   const toastTimer = useRef(null);
   const historyRef = useRef(history);
@@ -1355,6 +1359,7 @@ export default function MacroConsole() {
   useEffect(() => {
     return () => {
       if (restIntervalRef.current) clearInterval(restIntervalRef.current);
+      if (quickRestRef.current) clearInterval(quickRestRef.current);
     };
   }, []);
 
@@ -1788,6 +1793,7 @@ export default function MacroConsole() {
   }
 
   function startSession(day) {
+    clearQuickRest();
     const queue = buildSessionQueue(day, sessionMode, loggedTodayByExercise(day));
     if (queue.length === 0) {
       showToast("All planned sets are already logged today");
@@ -1895,6 +1901,72 @@ export default function MacroConsole() {
     }
   }
 
+  function signalRestDone() {
+    showToast("Rest's up");
+    try { if (navigator.vibrate) navigator.vibrate(160); } catch (e) {}
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.frequency.value = 660;
+      gain.gain.value = 0.05;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.22);
+      osc.stop(ctx.currentTime + 0.24);
+      osc.onended = () => { try { ctx.close(); } catch (e) {} };
+    } catch (e) {}
+  }
+
+  function clearQuickRest() {
+    if (quickRestRef.current) clearInterval(quickRestRef.current);
+    quickRestRef.current = null;
+    setQuickRest(null);
+  }
+
+  function startQuickRest(name, seconds) {
+    const total = Math.round(Number(seconds) || 0);
+    if (total <= 0) return;
+    if (quickRestRef.current) clearInterval(quickRestRef.current);
+    let left = total;
+    setQuickRest({ name, remaining: left, total });
+    quickRestRef.current = setInterval(() => {
+      left -= 1;
+      if (left <= 0) {
+        clearInterval(quickRestRef.current);
+        quickRestRef.current = null;
+        setQuickRest(null);
+        signalRestDone();
+      } else {
+        setQuickRest({ name, remaining: left, total });
+      }
+    }, 1000);
+  }
+
+  function onDaySwipeStart(event) {
+    const target = event.target;
+    if (target && target.closest && target.closest("input, textarea, button, a, select")) return;
+    const touch = event.changedTouches && event.changedTouches[0];
+    if (!touch) return;
+    swipeRef.current = { x: touch.clientX, y: touch.clientY };
+  }
+
+  function onDaySwipeEnd(event) {
+    const start = swipeRef.current;
+    swipeRef.current = null;
+    if (!start) return;
+    const touch = event.changedTouches && event.changedTouches[0];
+    if (!touch) return;
+    const delta = swipeDayDelta(touch.clientX - start.x, touch.clientY - start.y);
+    if (!delta) return;
+    const next = addDays(dateStr, delta);
+    if (delta > 0 && next > addDays(todayStr(), 7)) return;
+    goToDate(next);
+  }
+
   function advanceSession() {
     const queue = sessionQueueRef.current;
     const index = sessionIndexRef.current;
@@ -1906,7 +1978,8 @@ export default function MacroConsole() {
       return;
     }
     nextIndexRef.current = nextIndex;
-    const restSeconds = sessionMode === "circuit" ? 20 : ((step && step.ex.rest) || 90);
+    const plannedRest = step && Number(step.ex.rest);
+    const restSeconds = plannedRest > 0 ? plannedRest : (sessionMode === "circuit" ? 20 : 90);
     setSessionPhase("resting");
     setRestRemaining(restSeconds);
     speak(sessionMode === "circuit" ? "Next up." : `Rest for ${restSeconds} seconds.`);
@@ -1917,6 +1990,7 @@ export default function MacroConsole() {
       if (remaining <= 0) {
         clearInterval(restIntervalRef.current);
         restIntervalRef.current = null;
+        signalRestDone();
         goToNextSet();
       }
     }, 1000);
@@ -2073,6 +2147,7 @@ export default function MacroConsole() {
   function openEditRecipe(r) {
     setRecipeForm({
       id: r.id, name: r.name, servings: String(r.servings || 1),
+      batchPortions: r.batchPortions != null ? String(r.batchPortions) : "",
       calories: String(r.calories || 0), protein: String(r.protein || 0), carbs: String(r.carbs || 0),
       fat: String(r.fat || 0), fiber: String(r.fiber || 0),
       ingredients: (r.ingredients && r.ingredients.length ? r.ingredients : [emptyIngredient()]).map((i) => ({
@@ -2135,6 +2210,8 @@ export default function MacroConsole() {
 
   async function saveRecipeForm() {
     if (!recipeForm.name.trim()) return;
+    const previous = recipes.find((item) => item.id === recipeForm.id);
+    const batch = batchFieldsFromForm(recipeForm.batchPortions, previous);
     const recipe = {
       id: recipeForm.id || genId(),
       name: recipeForm.name.trim(),
@@ -2153,6 +2230,10 @@ export default function MacroConsole() {
       method: recipeForm.method,
       mealType: recipeForm.mealType || "Uncategorized",
     };
+    if (batch.batchPortions != null) {
+      recipe.batchPortions = batch.batchPortions;
+      recipe.portionsLeft = batch.portionsLeft;
+    }
     await persistFullRecipe(recipe);
     setRecipeModalOpen(false);
     showToast("Recipe saved");
@@ -2171,6 +2252,17 @@ export default function MacroConsole() {
     setDayData(newDay);
     persist(newDay);
     showToast(mult === 1 ? "Added to log" : `Added ${mult} servings to log`);
+  }
+
+  function logBatchPortion(recipe) {
+    if (dayData.locked) return;
+    const next = decrementPortion(recipe);
+    if (!next.logged) {
+      showToast("No portions left");
+      return;
+    }
+    logRecipeToday(recipe, 1);
+    persistFullRecipe(next.recipe);
   }
 
   function deleteFood(id) {
@@ -3154,7 +3246,7 @@ export default function MacroConsole() {
         input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
       `}</style>
 
-      <div className="max-w-xl mx-auto px-4 py-4 pb-12">
+      <div className="max-w-xl mx-auto px-4 py-4 pb-24">
         {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <div className="font-display font-semibold uppercase" style={{ color: palette.text, fontSize: 18, letterSpacing: "0.06em" }}>
@@ -3167,79 +3259,23 @@ export default function MacroConsole() {
                 <span className="font-mono text-sm" style={{ color: palette.text }}>{meta.streak}</span>
               </div>
             )}
+            <button
+              onClick={() => setView("supps")}
+              className="font-display uppercase"
+              style={{ color: view === "supps" ? palette.amber : palette.textMuted, fontSize: 11, letterSpacing: "0.06em" }}
+            >
+              Supps
+            </button>
             <button onClick={() => { setTargetForm(targetsToForm(targets)); setSettingsOpen(true); }} aria-label="Settings">
               <Settings size={20} style={{ color: palette.textMuted }} />
             </button>
           </div>
         </div>
 
-        {/* View switcher */}
-        <div className="flex gap-1 mb-3">
-          <button
-            onClick={() => setView("console")}
-            className="flex-1 flex items-center justify-center gap-1 rounded-lg py-1.5 font-display uppercase"
-            style={{
-              background: view === "console" ? palette.amber : "transparent",
-              color: view === "console" ? "#1B1815" : palette.textMuted,
-              border: `1px solid ${view === "console" ? palette.amber : palette.border}`,
-              letterSpacing: "0.04em", fontSize: 11,
-            }}
-          >
-            <LayoutDashboard size={13} /> Dashboard
-          </button>
-          <button
-            onClick={() => setView("book")}
-            className="flex-1 flex items-center justify-center gap-1 rounded-lg py-1.5 font-display uppercase"
-            style={{
-              background: view === "book" ? palette.amber : "transparent",
-              color: view === "book" ? "#1B1815" : palette.textMuted,
-              border: `1px solid ${view === "book" ? palette.amber : palette.border}`,
-              letterSpacing: "0.04em", fontSize: 11,
-            }}
-          >
-            <BookOpen size={13} /> Log
-          </button>
-          <button
-            onClick={() => setView("supps")}
-            className="flex-1 flex items-center justify-center gap-1 rounded-lg py-1.5 font-display uppercase"
-            style={{
-              background: view === "supps" ? palette.amber : "transparent",
-              color: view === "supps" ? "#1B1815" : palette.textMuted,
-              border: `1px solid ${view === "supps" ? palette.amber : palette.border}`,
-              letterSpacing: "0.04em", fontSize: 11,
-            }}
-          >
-            <Pill size={13} /> Supps
-          </button>
-          <button
-            onClick={() => setView("progress")}
-            className="flex-1 flex items-center justify-center gap-1 rounded-lg py-1.5 font-display uppercase"
-            style={{
-              background: view === "progress" ? palette.amber : "transparent",
-              color: view === "progress" ? "#1B1815" : palette.textMuted,
-              border: `1px solid ${view === "progress" ? palette.amber : palette.border}`,
-              letterSpacing: "0.04em", fontSize: 11,
-            }}
-          >
-            <Activity size={13} /> Progress
-          </button>
-          <button
-            onClick={() => setView("workout")}
-            className="flex-1 flex items-center justify-center gap-1 rounded-lg py-1.5 font-display uppercase"
-            style={{
-              background: view === "workout" ? palette.amber : "transparent",
-              color: view === "workout" ? "#1B1815" : palette.textMuted,
-              border: `1px solid ${view === "workout" ? palette.amber : palette.border}`,
-              letterSpacing: "0.04em", fontSize: 11,
-            }}
-          >
-            <Dumbbell size={13} /> Workout
-          </button>
-        </div>
-
         {(() => {
           const syncLine = describeSyncLine(syncReport, syncStatus, weeklyBackupOn);
           if (!syncLine) return null;
+          const syncColor = syncLine.tone === "error" ? palette.alert : syncLine.tone === "pending" ? palette.amber : syncLine.tone === "ok" ? palette.olive : palette.textMuted;
           return (
             <div
               role="status"
@@ -3247,9 +3283,9 @@ export default function MacroConsole() {
               style={{
                 fontSize: 12,
                 lineHeight: 1.35,
-                color: syncLine.bad ? palette.alert : palette.textMuted,
+                color: syncColor,
                 background: palette.panel,
-                border: `1px solid ${syncLine.bad ? palette.alert : palette.border}`,
+                border: `1px solid ${syncLine.tone === "error" ? palette.alert : syncLine.tone === "pending" ? palette.amber : palette.border}`,
               }}
             >
               {syncLine.text}
@@ -3276,7 +3312,7 @@ export default function MacroConsole() {
         )}
 
         {view === "console" && (
-        <>
+        <div onTouchStart={onDaySwipeStart} onTouchEnd={onDaySwipeEnd}>
         {/* Date nav */}
         <div className="flex items-center justify-between mb-3">
           <button onClick={() => goToDate(addDays(dateStr, -1))} className="p-1.5 rounded-lg" style={{ border: `1px solid ${palette.border}` }}>
@@ -3300,7 +3336,7 @@ export default function MacroConsole() {
           <Button onClick={handleSave} variant="ghost" size="sm" grow>Save</Button>
           <Button
             onClick={handleSyncNow}
-            variant={syncBusy !== "sync" && (syncStatus.state === "error" || (syncReport && syncReport.ok === false)) ? "danger" : "ghost"}
+            variant={syncBusy !== "sync" && syncIndicator(syncReport, syncStatus).tone === "error" ? "danger" : "ghost"}
             size="sm"
             grow
             disabled={syncBusy !== ""}
@@ -3327,34 +3363,33 @@ export default function MacroConsole() {
           <>
             {/* Hero calorie gauge — the one focal point; everything else stays quiet */}
             {(() => {
-              const heroPercent = targets.calories > 0 ? Math.max(0, Math.min(100, (totals.calories / targets.calories) * 100)) : 0;
+              const caloriesLeft = remainder(totals.calories, targets.calories);
+              const proteinLeft = remainder(totals.protein, targets.protein);
               const heroPath = "M 25 148 A 115 115 0 0 1 255 148";
-              const heroShown = ready ? heroPercent : 0;
-              const heroDiff = Math.round(targets.calories - totals.calories);
-              const heroOver = Math.round(totals.calories - targets.calories);
+              const heroShown = ready ? caloriesLeft.percentLeft : 0;
               return (
                 <div className="mb-3">
                   <div className="relative mx-auto" style={{ maxWidth: 210 }}>
                     <svg viewBox="0 0 280 165" className="w-full h-auto">
                       <path d={heroPath} pathLength="100" fill="none" stroke={palette.border} strokeWidth={18} strokeLinecap="round" />
                       <path
-                        d={heroPath} pathLength="100" fill="none" stroke={palette.amber} strokeWidth={18} strokeLinecap="round"
+                        d={heroPath} pathLength="100" fill="none" stroke={caloriesLeft.over ? palette.alert : palette.amber} strokeWidth={18} strokeLinecap="round"
                         strokeDasharray={`${heroShown} ${100 - heroShown}`}
                         style={{ transition: "stroke-dasharray 0.9s cubic-bezier(0.22,1,0.36,1)", filter: "drop-shadow(0 0 14px rgba(224,168,62,0.45))" }}
                       />
                     </svg>
                     <div className="absolute inset-0 flex flex-col items-center justify-end" style={{ paddingBottom: 6 }}>
-                      <span className="font-mono font-bold" style={{ fontSize: 38, lineHeight: 1, color: palette.text }}>
-                        {Math.round(totals.calories).toLocaleString()}
+                      <span className="font-mono font-bold" style={{ fontSize: 38, lineHeight: 1, color: caloriesLeft.over ? palette.alert : palette.text }}>
+                        {caloriesLeft.amount.toLocaleString()}
                       </span>
                       <span className="font-mono" style={{ color: palette.textMuted, fontSize: 11 }}>
-                        / {targets.calories.toLocaleString()} cal
+                        kcal {caloriesLeft.over ? "over" : "left"}
                       </span>
                     </div>
                   </div>
                   <div className="text-center -mt-1 mb-2">
-                    <span className="font-mono" style={{ color: heroOver > 0 ? palette.alert : palette.textFaint, fontSize: 11 }}>
-                      {heroOver > 0 ? `+${heroOver} over` : `${heroDiff} to go`}
+                    <span className="font-mono" style={{ color: proteinLeft.over ? palette.alert : palette.rust, fontSize: 15 }}>
+                      {proteinLeft.amount}g protein {proteinLeft.over ? "over" : "left"}
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-1" style={{ maxWidth: 260, margin: "0 auto" }}>
@@ -3536,11 +3571,11 @@ export default function MacroConsole() {
             </div>
           </>
         )}
-        </>
+        </div>
         )}
 
         {view === "book" && (
-          <>
+          <div onTouchStart={onDaySwipeStart} onTouchEnd={onDaySwipeEnd}>
             {/* Compact date nav — logging always applies to whichever day is selected here */}
             <div className="flex items-center justify-between mb-4">
               <button onClick={() => goToDate(addDays(dateStr, -1))} className="p-2 rounded-lg" style={{ border: `1px solid ${palette.border}` }}>
@@ -3782,6 +3817,26 @@ export default function MacroConsole() {
             </>
             )}
 
+            {recipes.some((recipe) => batchState(recipe)) && (
+              <Panel className="mb-3">
+                <Label>Leftovers</Label>
+                <div className="space-y-2 mt-2">
+                  {recipes.filter((recipe) => batchState(recipe)).map((recipe) => {
+                    const batch = batchState(recipe);
+                    return (
+                      <div key={recipe.id}>
+                        <div className="text-sm truncate" style={{ color: palette.text }}>{recipe.name}</div>
+                        <div className="flex items-center justify-between gap-2 mt-1" style={{ flexWrap: "wrap" }}>
+                          <div className="font-mono" style={{ color: batch.left > 0 ? palette.amber : palette.textFaint, fontSize: 11 }}>{portionsLeftLabel(recipe)}</div>
+                          <Button onClick={() => logBatchPortion(recipe)} disabled={dayData.locked || batch.left <= 0} size="sm">Log a portion</Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Panel>
+            )}
+
             <div className="mt-2 pt-4 border-t" style={{ borderColor: palette.border }}>
               <button
                 type="button"
@@ -3854,6 +3909,7 @@ export default function MacroConsole() {
                           onEdit={() => openEditRecipe(r)}
                           onDelete={() => deleteRecipe(r.id)}
                           onLog={(servings) => logRecipeToday(r, servings)}
+                          onLogPortion={() => logBatchPortion(r)}
                           locked={dayData.locked}
                         />
                       ))}
@@ -3958,7 +4014,7 @@ export default function MacroConsole() {
               </Button>
             </Panel>
 
-          </>
+          </div>
         )}
 
 
@@ -4715,7 +4771,11 @@ export default function MacroConsole() {
                       exerciseLog={exerciseLog}
                       today={todayStr()}
                       agreedWeightLb={nextWeightOverride[ex.name]}
-                      onLog={logExerciseWeight}
+                      onLog={(dayKey, name, weight, reps) => {
+                        const logged = logExerciseWeight(dayKey, name, weight, reps);
+                        startQuickRest(ex.name, ex.rest);
+                        return logged;
+                      }}
                       onMarkDone={markTrainedToday}
                     />
                   ))}
@@ -4749,6 +4809,45 @@ export default function MacroConsole() {
           );
         })()}
       </div>
+
+      {quickRest && (
+        <div className="fixed left-0 right-0 z-30 px-4" style={{ bottom: 68 }}>
+          <div className="max-w-xl mx-auto rounded-lg px-3 py-2 flex items-center justify-between gap-3" style={{ background: palette.panel, border: `1px solid ${palette.border}` }}>
+            <div>
+              <div className="font-mono uppercase" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.06em" }}>Rest · {quickRest.name}</div>
+              <div className="font-mono" style={{ color: palette.amber, fontSize: 20, lineHeight: 1.1 }}>{quickRest.remaining}s</div>
+            </div>
+            <button onClick={clearQuickRest} className="font-display uppercase" style={{ color: palette.textMuted, fontSize: 12, letterSpacing: "0.06em" }}>Skip</button>
+          </div>
+        </div>
+      )}
+
+      <nav className="fixed bottom-0 left-0 right-0 z-30" style={{ background: palette.bg, borderTop: `1px solid ${palette.border}` }}>
+        <div className="max-w-xl mx-auto flex">
+          {[
+            ["console", "Today", LayoutDashboard],
+            ["book", "Log", BookOpen],
+            ["workout", "Workout", Dumbbell],
+            ["progress", "Progress", Activity],
+          ].map(([key, label, Icon]) => (
+            <button
+              key={key}
+              onClick={() => setView(key)}
+              className="flex-1 flex flex-col items-center justify-center gap-0.5 py-2 font-display uppercase"
+              style={{
+                color: view === key ? palette.amber : palette.textFaint,
+                letterSpacing: "0.04em",
+                fontSize: 10,
+                background: "transparent",
+                border: "none",
+              }}
+            >
+              <Icon size={18} />
+              {label}
+            </button>
+          ))}
+        </div>
+      </nav>
 
       {AI_ENABLED && (<>
       {/* Floating quick-log — reachable from every tab */}
@@ -4794,7 +4893,7 @@ export default function MacroConsole() {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full font-mono text-xs flex items-center gap-3" style={{ background: palette.panelAlt, border: `1px solid ${palette.border}`, color: palette.text }}>
+        <div className="fixed left-1/2 -translate-x-1/2 px-4 py-2 rounded-full font-mono text-xs flex items-center gap-3 max-w-[90vw]" style={{ bottom: 76, zIndex: 40, background: palette.panelAlt, border: `1px solid ${palette.border}`, color: palette.text }}>
           <span>{toast}</span>
           {undoAction && (
             <button onClick={undoAction} className="font-display uppercase" style={{ color: palette.amber, letterSpacing: "0.04em" }}>
@@ -5094,9 +5193,16 @@ export default function MacroConsole() {
               ))}
             </div>
 
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center gap-2 mb-2">
               <span className="text-sm" style={{ color: palette.textMuted }}>Servings</span>
               <NumInput value={recipeForm.servings} onChange={(v) => setRecipeForm({ ...recipeForm, servings: v })} placeholder="1" />
+            </div>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="text-sm" style={{ color: palette.textMuted }}>Batch portions</span>
+              <NumInput value={recipeForm.batchPortions || ""} onChange={(v) => setRecipeForm({ ...recipeForm, batchPortions: v })} placeholder="—" />
+            </div>
+            <div className="font-mono -mt-3 mb-4" style={{ color: palette.textFaint, fontSize: 10 }}>
+              Optional. Set this when you cook a batch, then log one portion at a time.
             </div>
 
             <Label>Ingredients</Label>
