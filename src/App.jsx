@@ -18,10 +18,11 @@ import {
 import {
   parseSetsCount,
   parseRepRange,
-  planWeightLb,
   buildSessionQueue,
   displaySetNumber,
   setsLoggedToday,
+  loggedSetDefaults,
+  recommendationText,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
 import {
@@ -960,10 +961,32 @@ function ExerciseIcon({ icon, frame }) {
   );
 }
 
-function ExerciseLogCard({ ex, dayKey, lastLog, setsDone, onLog, onMarkDone }) {
-  const planned = planWeightLb(ex);
-  const [weight, setWeight] = useState(planned != null ? String(planned) : "");
-  const [reps, setReps] = useState("");
+function ExerciseSetInputs({ defaults, repsPlaceholder, onLog }) {
+  const [weight, setWeight] = useState(defaults.weight);
+  const [reps, setReps] = useState(defaults.reps);
+  return (
+    <div className="flex items-center gap-2 pt-2" style={{ borderTop: `1px solid ${palette.border}` }}>
+      <input
+        type="number" inputMode="decimal" value={weight} onChange={(e) => setWeight(e.target.value)}
+        placeholder={defaults.weight || "lb"}
+        aria-label="Weight in pounds"
+        className="font-mono rounded-lg px-2 py-1.5 text-sm outline-none border"
+        style={{ width: 72, background: palette.panel, borderColor: palette.border, color: palette.text }}
+      />
+      <span className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>lb</span>
+      <input
+        type="number" inputMode="numeric" value={reps} onChange={(e) => setReps(e.target.value)}
+        placeholder={repsPlaceholder}
+        aria-label="Reps"
+        className="font-mono rounded-lg px-2 py-1.5 text-sm outline-none border"
+        style={{ width: 56, background: palette.panel, borderColor: palette.border, color: palette.text }}
+      />
+      <Button onClick={() => onLog(Number(weight), reps ? Number(reps) : null)} disabled={!weight || Number(weight) <= 0} size="sm">Log</Button>
+    </div>
+  );
+}
+
+function ExerciseLogCard({ ex, dayKey, setsDone, exerciseLog, today, agreedWeightLb, onLog, onMarkDone }) {
   const [formOpen, setFormOpen] = useState(false);
   const bodyweight = ex.startWeight === "bodyweight";
   const tagStyle = WORKOUT_TAG_STYLES[ex.tag] || {};
@@ -971,6 +994,10 @@ function ExerciseLogCard({ ex, dayKey, lastLog, setsDone, onLog, onMarkDone }) {
   const fd = FORM_DETAILS[ex.name];
   const totalSets = parseSetsCount(ex.sets);
   const shownSet = setsDone >= totalSets ? totalSets : (Number(setsDone) || 0) + 1;
+  const defaults = loggedSetDefaults(ex, exerciseLog, shownSet, today);
+  const recommendation = recommendationText(ex, agreedWeightLb);
+  const repRange = parseRepRange(ex.sets);
+  const repsPlaceholder = repRange ? `${repRange.lo}-${repRange.hi}` : "reps";
   return (
     <div className="rounded-lg p-3 mb-2" style={{ background: palette.panelAlt, border: `1px solid ${palette.border}` }}>
       {isHold ? (
@@ -1011,42 +1038,28 @@ function ExerciseLogCard({ ex, dayKey, lastLog, setsDone, onLog, onMarkDone }) {
           )}
         </>
       )}
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between gap-2 mb-2" style={{ flexWrap: "wrap" }}>
         <span className="font-mono" style={{ color: palette.amber, fontSize: 13, fontWeight: 600 }}>
           Set {shownSet} of {totalSets}{setsDone >= totalSets ? " logged" : ""}{ex.per ? <span style={{ color: palette.textFaint, fontSize: 10 }}> {ex.per}</span> : null}
         </span>
-        <span className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>Plan {ex.sets} · {ex.startWeight || "—"}</span>
+        <span className="font-mono" style={{ color: palette.textFaint, fontSize: 10, flexShrink: 0 }}>Plan {ex.sets} · {ex.startWeight || "—"}</span>
       </div>
       {!bodyweight && (
-        <div className="flex items-center gap-2 pt-2" style={{ borderTop: `1px solid ${palette.border}` }}>
-          <input
-            type="number" inputMode="decimal" value={weight} onChange={(e) => setWeight(e.target.value)}
-            placeholder={planned != null ? String(planned) : "lb"}
-            className="font-mono rounded-lg px-2 py-1.5 text-sm outline-none border"
-            style={{ width: 56, background: palette.panel, borderColor: palette.border, color: palette.text }}
-          />
-          <span className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>lb</span>
-          <input
-            type="number" inputMode="numeric" value={reps} onChange={(e) => setReps(e.target.value)}
-            placeholder="reps"
-            className="font-mono rounded-lg px-2 py-1.5 text-sm outline-none border"
-            style={{ width: 48, background: palette.panel, borderColor: palette.border, color: palette.text }}
-          />
-          <Button onClick={() => onLog(dayKey, ex.name, Number(weight), reps ? Number(reps) : null)} disabled={!weight || Number(weight) <= 0} size="sm">Log</Button>
-        </div>
-      )}
-      {!bodyweight && (
-        <div className="font-mono mt-1.5" style={{ color: palette.textFaint, fontSize: 10 }}>
-          {lastLog && lastLog.weight != null
-            ? `last: ${lastLog.weight}lb${lastLog.reps != null ? ` × ${lastLog.reps}` : ""}`
-            : "no log yet · reps optional"}
-        </div>
+        <ExerciseSetInputs
+          key={`${ex.name}-${shownSet}`}
+          defaults={defaults}
+          repsPlaceholder={repsPlaceholder}
+          onLog={(weight, reps) => onLog(dayKey, ex.name, weight, reps)}
+        />
       )}
       {bodyweight && (
         <div className="flex items-center justify-between pt-2" style={{ borderTop: `1px solid ${palette.border}` }}>
           <span className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>Bodyweight — nothing to log here</span>
           <Button onClick={() => onMarkDone()} size="sm">Mark done</Button>
         </div>
+      )}
+      {recommendation && (
+        <div className="font-mono mt-1.5" style={{ color: palette.textFaint, fontSize: 10 }}>{recommendation}</div>
       )}
     </div>
   );
@@ -1699,21 +1712,6 @@ export default function MacroConsole() {
     queueCloudSync();
   }
 
-  function lastLogForExercise(name, expectedSets) {
-    const entries = exerciseLog.filter((l) => l.exercise === name);
-    if (!entries.length) return null;
-    const dates = [...new Set(entries.map((e) => e.date))].sort();
-    let targetDate = null;
-    for (let i = dates.length - 1; i >= 0; i--) {
-      const count = entries.filter((e) => e.date === dates[i]).length;
-      if (!expectedSets || count >= expectedSets) { targetDate = dates[i]; break; }
-    }
-    if (!targetDate) targetDate = dates[dates.length - 1];
-    const sessionEntries = entries.filter((e) => e.date === targetDate).sort((a, b) => (a.setNumber || 0) - (b.setNumber || 0));
-    const last = sessionEntries[sessionEntries.length - 1];
-    return { weight: last.weight, reps: last.reps ?? null, complete: targetDate !== dates[dates.length - 1] || sessionEntries.length >= (expectedSets || 1) };
-  }
-
   const pendingPatchDay = useRef(null);
 
   function patchDay(patcher) {
@@ -1784,9 +1782,9 @@ export default function MacroConsole() {
   }
 
   function primeStepInputs(step) {
-    const planned = planWeightLb(step.ex);
-    setSessionWeight(planned != null ? String(planned) : "");
-    setSessionReps("");
+    const defaults = loggedSetDefaults(step && step.ex, exerciseLog, step && step.setNumber, todayStr());
+    setSessionWeight(defaults.weight);
+    setSessionReps(defaults.reps);
   }
 
   function startSession(day) {
@@ -3140,6 +3138,9 @@ export default function MacroConsole() {
         .font-body { font-family: 'Inter', sans-serif; }
         input:focus { outline: 2px solid ${palette.amber}; outline-offset: 1px; }
         button:focus-visible { outline: 2px solid ${palette.amber}; outline-offset: 2px; }
+        input[type="number"]::-webkit-outer-spin-button,
+        input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
       `}</style>
 
       <div className="max-w-xl mx-auto px-4 py-4 pb-12">
@@ -4538,9 +4539,10 @@ export default function MacroConsole() {
                 ) : sessionPhase === "resting" ? (
                   (() => {
                     const nextStep = sessionQueue[nextIndexRef.current];
-                    const nextWeight = nextStep ? planWeightLb(nextStep.ex) : null;
                     const nextIsBodyweight = nextStep && nextStep.ex.startWeight === "bodyweight";
                     const nextLogged = nextStep ? setsLoggedToday(exerciseLog, nextStep.ex.name, todayStr()) : 0;
+                    const nextDefaults = nextStep ? loggedSetDefaults(nextStep.ex, exerciseLog, nextStep.setNumber, todayStr()) : null;
+                    const nextRecommendation = nextStep ? recommendationText(nextStep.ex, nextWeightOverride[nextStep.ex.name]) : "";
                     return (
                       <div className="text-center py-6">
                         <div className="font-mono" style={{ color: palette.textFaint, fontSize: 11, marginBottom: 8 }}>RESTING</div>
@@ -4555,9 +4557,12 @@ export default function MacroConsole() {
                               <div className="font-mono uppercase" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.06em" }}>Next up</div>
                               <div className="text-sm font-semibold truncate" style={{ color: palette.text }}>{nextStep.ex.name}</div>
                               <div className="font-mono" style={{ color: palette.amber, fontSize: 13 }}>
-                                {nextIsBodyweight ? "Bodyweight" : nextWeight != null ? `Plan ${nextWeight}lb` : "Plan weight not set"}
-                                {nextStep.ex.sets ? ` · ${nextStep.ex.sets}` : ""}
+                                {nextIsBodyweight ? "Bodyweight" : nextDefaults && nextDefaults.weight ? `${nextDefaults.weight} lb` : "Weight not set"}
+                                {nextDefaults && nextDefaults.reps ? ` × ${nextDefaults.reps}` : ""}
                               </div>
+                              {nextRecommendation && (
+                                <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>{nextRecommendation}</div>
+                              )}
                               <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>Set {displaySetNumber(nextStep, nextLogged)} of {nextStep.totalSets}{nextStep.ex.per ? ` ${nextStep.ex.per}` : ""}</div>
                             </div>
                           </div>
@@ -4576,7 +4581,6 @@ export default function MacroConsole() {
                     <div className="text-center mb-1">
                       <div className="text-lg font-semibold" style={{ color: palette.text }}>{step.ex.name}</div>
                       <div className="font-mono" style={{ color: palette.amber, fontSize: 13 }}>Set {displaySetNumber(step, setsLoggedToday(exerciseLog, step.ex.name, todayStr()))} of {step.totalSets}{step.ex.per ? ` ${step.ex.per}` : ""}</div>
-                      <div className="font-mono mt-1" style={{ color: palette.textMuted, fontSize: 12 }}>Plan {step.ex.startWeight || "—"} · {step.ex.sets}</div>
                       <div className="font-mono mt-1" style={{ color: palette.textFaint, fontSize: 11 }}>{step.ex.cue}</div>
                     </div>
 
@@ -4585,11 +4589,12 @@ export default function MacroConsole() {
                         <button onClick={() => adjustSessionWeight(-2.5)} className="rounded-full flex items-center justify-center" style={{ width: 36, height: 36, background: palette.panelAlt, border: `1px solid ${palette.border}` }}>
                           <Minus size={16} style={{ color: palette.textMuted }} />
                         </button>
-                        <div className="text-center" style={{ minWidth: 76 }}>
+                        <div className="text-center" style={{ minWidth: 96 }}>
                           <input
                             type="number" inputMode="decimal" value={sessionWeight} onChange={(e) => setSessionWeight(e.target.value)}
+                            aria-label="Weight in pounds"
                             className="font-mono font-bold text-center rounded-lg"
-                            style={{ width: 76, fontSize: 26, background: "transparent", border: "none", color: palette.text, outline: "none" }}
+                            style={{ width: 96, fontSize: 26, background: "transparent", border: "none", color: palette.text, outline: "none" }}
                           />
                           <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>lb</div>
                         </div>
@@ -4599,7 +4604,7 @@ export default function MacroConsole() {
                       </div>
                     )}
 
-                    <div className="flex items-center justify-center gap-3 mb-5">
+                    <div className="flex items-center justify-center gap-3 mb-3">
                       <button onClick={() => adjustSessionReps(-1)} className="rounded-full flex items-center justify-center" style={{ width: 36, height: 36, background: palette.panelAlt, border: `1px solid ${palette.border}` }}>
                         <Minus size={16} style={{ color: palette.textMuted }} />
                       </button>
@@ -4607,6 +4612,7 @@ export default function MacroConsole() {
                         <input
                           type="number" inputMode="numeric" value={sessionReps} onChange={(e) => setSessionReps(e.target.value)}
                           placeholder={(() => { const range = parseRepRange(step.ex.sets); return range ? `${range.lo}-${range.hi}` : "reps"; })()}
+                          aria-label="Reps"
                           className="font-mono font-bold text-center"
                           style={{ width: 76, fontSize: 26, background: "transparent", border: "none", color: palette.text, outline: "none" }}
                         />
@@ -4616,6 +4622,12 @@ export default function MacroConsole() {
                         <Plus size={16} style={{ color: palette.amber }} />
                       </button>
                     </div>
+
+                    {recommendationText(step.ex, nextWeightOverride[step.ex.name]) && (
+                      <div className="font-mono text-center mb-4" style={{ color: palette.textFaint, fontSize: 11 }}>
+                        {recommendationText(step.ex, nextWeightOverride[step.ex.name])}
+                      </div>
+                    )}
 
                     <Button onClick={logSessionSet} full>Log &amp; next</Button>
                   </div>
@@ -4683,7 +4695,9 @@ export default function MacroConsole() {
                       ex={ex}
                       dayKey={day.key}
                       setsDone={setsLoggedToday(exerciseLog, ex.name, todayStr())}
-                      lastLog={lastLogForExercise(ex.name, parseSetsCount(ex.sets))}
+                      exerciseLog={exerciseLog}
+                      today={todayStr()}
+                      agreedWeightLb={nextWeightOverride[ex.name]}
                       onLog={logExerciseWeight}
                       onMarkDone={markTrainedToday}
                     />
