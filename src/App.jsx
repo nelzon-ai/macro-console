@@ -1193,11 +1193,11 @@ export default function MacroConsole() {
     scheduleSync();
   }
 
-  function showToast(msg) {
+  function showToast(msg, duration = 1600) {
     setToast(msg);
     setUndoAction(null);
     if (toastTimer.current) clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(""), 1600);
+    toastTimer.current = setTimeout(() => setToast(""), duration);
   }
 
   // For deletions: removes optimistically, but holds the actual persistence
@@ -2911,7 +2911,18 @@ export default function MacroConsole() {
   async function handleSyncNow() {
     persistSyncForm();
     setSyncBusy("sync");
-    try { await syncNow(); } finally { setSyncBusy(""); }
+    try {
+      const result = await syncNow();
+      if (result && result.ok && result.message && result.message.includes("could not")) showToast("Synced, with a problem", 2800);
+      else if (result && result.ok) showToast("Synced");
+      else if (result && result.skipped) showToast(result.message || "Add a sync token in Settings", 2800);
+      else if (result && result.pending) showToast("Sync waiting to retry", 2800);
+      else showToast("Sync failed", 2800);
+    } catch (e) {
+      showToast("Sync failed", 2800);
+    } finally {
+      setSyncBusy("");
+    }
   }
 
   function handleDisconnectSync() {
@@ -3285,23 +3296,29 @@ export default function MacroConsole() {
           </button>
         </div>
 
-        {/* Save / Lock bar */}
-        {!dayData.locked ? (
-          <div className="flex gap-2 mb-3">
-            <Button onClick={handleSave} variant="ghost" grow>Save</Button>
-            <Button onClick={handleLock} variant="primary" grow>
-              <span className="flex items-center justify-center gap-1"><Lock size={14} /> Lock day</span>
-            </Button>
-          </div>
-        ) : (
-          <div className="flex items-center justify-between mb-3 rounded-lg px-3 py-2" style={{ border: `1px solid ${palette.border}`, background: palette.panelAlt }}>
-            <span className="font-mono flex items-center gap-1" style={{ color: palette.textMuted, fontSize: 12 }}>
-              <Lock size={13} /> Day locked
+        <div className="flex gap-2 mb-3">
+          <Button onClick={handleSave} variant="ghost" size="sm" grow>Save</Button>
+          <Button
+            onClick={handleSyncNow}
+            variant={syncBusy !== "sync" && (syncStatus.state === "error" || (syncReport && syncReport.ok === false)) ? "danger" : "ghost"}
+            size="sm"
+            grow
+            disabled={syncBusy !== ""}
+          >
+            <span className="flex items-center justify-center gap-1">
+              {syncBusy === "sync" ? <Loader2 size={13} className="animate-spin" /> : <Cloud size={13} />}
+              {syncBusy === "sync" ? "Syncing..." : "Sync"}
             </span>
-            <button onClick={handleUnlock} className="font-display uppercase flex items-center gap-1" style={{ color: palette.amber, fontSize: 11, letterSpacing: "0.06em" }}>
-              <Unlock size={13} /> Unlock
-            </button>
-          </div>
+          </Button>
+          <Button onClick={dayData.locked ? handleUnlock : handleLock} variant={dayData.locked ? "primary" : "ghost"} size="sm" grow>
+            <span className="flex items-center justify-center gap-1">
+              {dayData.locked ? <Unlock size={13} /> : <Lock size={13} />}
+              {dayData.locked ? "Unlock" : "Lock"}
+            </span>
+          </Button>
+        </div>
+        {dayData.locked && (
+          <div className="font-mono -mt-2 mb-3 text-center" style={{ color: palette.textFaint, fontSize: 10 }}>Day locked</div>
         )}
 
         {dayLoading ? (
