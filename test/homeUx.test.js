@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   MAIN_NAV,
   remainder,
+  calorieProgress,
   proteinPace,
   PROTEIN_PACE_START_HOUR,
   swipeDayDelta,
@@ -20,6 +21,23 @@ test("every screen, including supplements, is on the bottom navigation", () => {
   assert.equal(new Set(views).size, views.length);
   assert.equal(MAIN_NAV.find((item) => item.view === "supps").label, "Supps");
   assert.ok(MAIN_NAV.every((item) => item.label && item.view));
+});
+
+test("calorie progress fills from zero toward the daily target", () => {
+  const start = calorieProgress(0, 2000);
+  assert.equal(start.consumed, 0);
+  assert.equal(start.percent, 0);
+  assert.equal(start.toGo, 2000);
+  assert.equal(start.over, false);
+  const mid = calorieProgress(400, 2000);
+  assert.equal(mid.consumed, 400);
+  assert.equal(mid.percent, 20);
+  assert.equal(mid.toGo, 1600);
+  const over = calorieProgress(2200, 2000);
+  assert.equal(over.percent, 100);
+  assert.equal(over.over, true);
+  assert.equal(over.overBy, 200);
+  assert.ok(mid.percent > start.percent);
 });
 
 test("remainder is what is left of the stored target", () => {

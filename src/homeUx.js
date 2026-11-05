@@ -9,6 +9,22 @@ export const MAIN_NAV = [
   { view: "supps", label: "Supps" },
 ];
 
+// Consumed calories fill the ring from empty toward the daily target.
+export function calorieProgress(eaten, target) {
+  const consumed = Math.max(0, Math.round(Number(eaten) || 0));
+  const goal = Math.max(0, Math.round(Number(target) || 0));
+  const overBy = Math.max(0, consumed - goal);
+  const percent = goal > 0 ? Math.max(0, Math.min(100, (consumed / goal) * 100)) : 0;
+  return {
+    consumed,
+    goal,
+    percent,
+    over: overBy > 0 && goal > 0,
+    overBy,
+    toGo: goal > 0 ? Math.max(0, goal - consumed) : 0,
+  };
+}
+
 export function remainder(value, target) {
   const eaten = Number(value) || 0;
   const goal = Number(target) || 0;
