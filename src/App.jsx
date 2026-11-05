@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, remainder, proteinPace, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm } from "./homeUx.js";
+import { MAIN_NAV, remainder, calorieProgress, proteinPace, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -3426,31 +3426,36 @@ export default function MacroConsole() {
           <>
             {/* Hero calorie gauge — the one focal point; everything else stays quiet */}
             {(() => {
-              const caloriesLeft = remainder(totals.calories, targets.calories);
+              const calories = calorieProgress(totals.calories, targets.calories);
               const proteinLeft = remainder(totals.protein, targets.protein);
               const now = new Date();
               const pace = isToday ? proteinPace({ protein: totals.protein, target: targets.protein, hour: now.getHours(), minute: now.getMinutes() }) : null;
               const heroPath = "M 25 148 A 115 115 0 0 1 255 148";
-              const heroShown = ready ? caloriesLeft.percentLeft : 0;
+              const heroShown = ready ? calories.percent : 0;
               return (
                 <div className="mb-3">
                   <div className="relative mx-auto" style={{ maxWidth: 210 }}>
                     <svg viewBox="0 0 280 165" className="w-full h-auto">
                       <path d={heroPath} pathLength="100" fill="none" stroke={palette.border} strokeWidth={18} strokeLinecap="round" />
                       <path
-                        d={heroPath} pathLength="100" fill="none" stroke={caloriesLeft.over ? palette.alert : palette.amber} strokeWidth={18} strokeLinecap="round"
+                        d={heroPath} pathLength="100" fill="none" stroke={calories.over ? palette.alert : palette.amber} strokeWidth={18} strokeLinecap="round"
                         strokeDasharray={`${heroShown} ${100 - heroShown}`}
                         style={{ transition: "stroke-dasharray 0.9s cubic-bezier(0.22,1,0.36,1)", filter: "drop-shadow(0 0 14px rgba(224,168,62,0.45))" }}
                       />
                     </svg>
                     <div className="absolute inset-0 flex flex-col items-center justify-end" style={{ paddingBottom: 6 }}>
-                      <span className="font-mono font-bold" style={{ fontSize: 38, lineHeight: 1, color: caloriesLeft.over ? palette.alert : palette.text }}>
-                        {caloriesLeft.amount.toLocaleString()}
+                      <span className="font-mono font-bold" style={{ fontSize: 38, lineHeight: 1, color: calories.over ? palette.alert : palette.text }}>
+                        {calories.consumed.toLocaleString()}
                       </span>
                       <span className="font-mono" style={{ color: palette.textMuted, fontSize: 11 }}>
-                        kcal {caloriesLeft.over ? "over" : "left"}
+                        / {calories.goal.toLocaleString()} kcal
                       </span>
                     </div>
+                  </div>
+                  <div className="text-center -mt-1">
+                    <span className="font-mono" style={{ color: calories.over ? palette.alert : palette.textFaint, fontSize: 11 }}>
+                      {calories.over ? `+${calories.overBy} kcal over` : `${calories.toGo.toLocaleString()} kcal to go`}
+                    </span>
                   </div>
                   <div className="text-center -mt-1 mb-2">
                     <span className="font-mono" style={{ color: proteinLeft.over ? palette.alert : palette.rust, fontSize: 15 }}>
