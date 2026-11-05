@@ -752,57 +752,6 @@ function WorkoutSummaryCard({ summary, onDismiss }) {
   );
 }
 
-function TodaySupplements({ groups, ticked, onToggle, onOpen }) {
-  return (
-    <Panel className="mb-3">
-      <div className="flex items-center justify-between gap-2 mb-1">
-        <div className="flex items-center gap-2 min-w-0">
-          <Pill size={14} style={{ color: palette.amber }} />
-          <Label>Supplements</Label>
-        </div>
-        <button type="button" onClick={onOpen} className="font-display uppercase flex-shrink-0" style={{ color: palette.amber, fontSize: 11, letterSpacing: "0.04em" }}>
-          All supplements
-        </button>
-      </div>
-      {(!groups || groups.length === 0) ? (
-        <div className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>
-          No supplements yet. Add them in Settings.
-        </div>
-      ) : groups.map((group, index) => (
-        <div key={group.key || index} className={index === 0 ? "mt-2" : "mt-3 pt-3"} style={index === 0 ? undefined : { borderTop: `1px solid ${palette.border}` }}>
-          <div className="flex items-baseline justify-between gap-2 mb-1">
-            <span className="font-display uppercase" style={{ color: palette.text, fontSize: 12, letterSpacing: "0.04em" }}>{group.title}</span>
-            {group.note ? <span className="font-mono text-right" style={{ color: palette.textFaint, fontSize: 10 }}>{group.note}</span> : null}
-          </div>
-          <div>
-            {(group.items || []).map((item) => {
-              const done = ticked.includes(item.id);
-              if (item.reminder) {
-                return (
-                  <div key={item.id} className="flex items-center gap-2 py-1">
-                    <span className="rounded-full flex-shrink-0" style={{ width: 6, height: 6, background: palette.textFaint }} />
-                    <span className="text-sm truncate" style={{ color: palette.text }}>{item.name}</span>
-                    {item.dose ? <span className="font-mono ml-auto flex-shrink-0" style={{ color: palette.textFaint, fontSize: 10 }}>{item.dose}</span> : null}
-                  </div>
-                );
-              }
-              return (
-                <button key={item.id} type="button" onClick={() => onToggle(item.id)} className="w-full flex items-center gap-2 py-1 text-left">
-                  <span className="flex items-center justify-center rounded flex-shrink-0" style={{ width: 18, height: 18, border: `1px solid ${done ? palette.olive : palette.border}`, background: done ? palette.olive : "transparent" }}>
-                    {done && <Check size={12} style={{ color: "#1B1815" }} />}
-                  </span>
-                  <span className="text-sm truncate" style={{ color: done ? palette.textFaint : palette.text, textDecoration: done ? "line-through" : "none" }}>{item.name}</span>
-                  {item.dose ? <span className="font-mono ml-auto flex-shrink-0" style={{ color: palette.textFaint, fontSize: 10 }}>{item.dose}</span> : null}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </Panel>
-  );
-}
-
 function Panel({ children, className = "", style = {} }) {
   return (
     <div
@@ -3520,13 +3469,6 @@ export default function MacroConsole() {
                 </div>
               );
             })()}
-
-            <TodaySupplements
-              groups={supplementGroups}
-              ticked={suppTicks.date === todayStr() ? suppTicks.ids : []}
-              onToggle={toggleSupp}
-              onOpen={() => setView("supps")}
-            />
 
             <Panel className="mb-3">
               <button onClick={() => setHomeProgressExpanded(!homeProgressExpanded)} className="w-full flex items-center justify-between">
