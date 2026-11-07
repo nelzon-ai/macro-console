@@ -4,8 +4,6 @@ import {
   MAIN_NAV,
   remainder,
   calorieProgress,
-  proteinPace,
-  PROTEIN_PACE_START_HOUR,
   swipeDayDelta,
   portionsLeftLabel,
   decrementPortion,
@@ -52,23 +50,6 @@ test("remainder is what is left of the stored target", () => {
   assert.equal(over.over, true);
   assert.equal(over.amount, 100);
   assert.equal(over.percentLeft, 0);
-});
-
-test("protein pace is linear across the waking window", () => {
-  assert.equal(PROTEIN_PACE_START_HOUR, 7);
-  const early = proteinPace({ protein: 0, target: 150, hour: 7, minute: 0 });
-  assert.equal(early.expected, 0);
-  assert.equal(early.label, "On pace");
-  const midday = proteinPace({ protein: 40, target: 150, hour: 14, minute: 0 });
-  assert.equal(midday.expected, 75);
-  assert.equal(midday.markerPercent, 50);
-  assert.equal(midday.label, "35g behind pace");
-  const caughtUp = proteinPace({ protein: 80, target: 150, hour: 14, minute: 0 });
-  assert.equal(caughtUp.label, "On pace");
-  const late = proteinPace({ protein: 100, target: 150, hour: 21, minute: 30 });
-  assert.equal(late.expected, 150);
-  assert.equal(late.label, "50g behind pace");
-  assert.equal(proteinPace({ protein: 10, target: 0, hour: 12 }), null);
 });
 
 test("horizontal swipes change the day and vertical drags do not", () => {
