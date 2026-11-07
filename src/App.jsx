@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, remainder, calorieProgress, proteinPace, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm } from "./homeUx.js";
+import { MAIN_NAV, remainder, calorieProgress, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -658,7 +658,7 @@ function buildBodyScanSystemPrompt() {
 // Gauge — the signature element. Hand-drawn semicircular instrument dial
 // using SVG pathLength normalization so the dash math stays simple.
 // ---------------------------------------------------------------------------
-function Gauge({ label, value, target, unit, color, size = "lg", ready, markerPercent, paceLabel }) {
+function Gauge({ label, value, target, unit, color, size = "lg", ready }) {
   const cfg = size === "lg"
     ? { vb: "0 0 220 130", r: 90, cx: 110, cy: 112, sw: 16, maxW: 260 }
     : { vb: "0 0 150 95", r: 58, cx: 75, cy: 76, sw: 12, maxW: 118 };
@@ -667,21 +667,6 @@ function Gauge({ label, value, target, unit, color, size = "lg", ready, markerPe
   const diff = Math.round(target - value);
   const overBy = Math.round(value - target);
   const shown = ready ? percent : 0;
-  let marker = null;
-  if (markerPercent != null && target > 0) {
-    const t = Math.max(0, Math.min(1, Number(markerPercent) / 100));
-    const x = cfg.cx - cfg.r * Math.cos(Math.PI * t);
-    const y = cfg.cy - cfg.r * Math.sin(Math.PI * t);
-    const dx = x - cfg.cx;
-    const dy = y - cfg.cy;
-    const len = Math.hypot(dx, dy) || 1;
-    marker = {
-      x1: x - (dx / len) * 8,
-      y1: y - (dy / len) * 8,
-      x2: x + (dx / len) * 5,
-      y2: y + (dy / len) * 5,
-    };
-  }
 
   return (
     <div className="flex flex-col items-center">
@@ -693,7 +678,6 @@ function Gauge({ label, value, target, unit, color, size = "lg", ready, markerPe
             strokeDasharray={`${shown} ${100 - shown}`}
             style={{ transition: "stroke-dasharray 0.8s cubic-bezier(0.22,1,0.36,1)" }}
           />
-          {marker && <line x1={marker.x1} y1={marker.y1} x2={marker.x2} y2={marker.y2} stroke={palette.text} strokeWidth={3} strokeLinecap="round" />}
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-end" style={{ paddingBottom: size === "lg" ? 8 : 2 }}>
           <span className={`font-mono font-semibold ${size === "lg" ? "text-4xl" : "text-sm"}`} style={{ color: palette.text }}>
@@ -708,8 +692,8 @@ function Gauge({ label, value, target, unit, color, size = "lg", ready, markerPe
         <div className="font-display uppercase" style={{ color: palette.textMuted, fontSize: size === "lg" ? 13 : 9, letterSpacing: "0.09em" }}>
           {label}
         </div>
-        <div className="font-mono" style={{ color: paceLabel ? (paceLabel === "On pace" ? palette.olive : palette.rust) : overBy > 0 ? palette.alert : palette.textFaint, fontSize: size === "lg" ? 11 : 9 }}>
-          {paceLabel || (overBy > 0 ? `+${overBy}${unit} over` : `${diff}${unit} to go`)}
+        <div className="font-mono" style={{ color: overBy > 0 ? palette.alert : palette.textFaint, fontSize: size === "lg" ? 11 : 9 }}>
+          {overBy > 0 ? `+${overBy}${unit} over` : `${diff}${unit} to go`}
         </div>
       </div>
     </div>
@@ -3428,8 +3412,6 @@ export default function MacroConsole() {
             {(() => {
               const calories = calorieProgress(totals.calories, targets.calories);
               const proteinLeft = remainder(totals.protein, targets.protein);
-              const now = new Date();
-              const pace = isToday ? proteinPace({ protein: totals.protein, target: targets.protein, hour: now.getHours(), minute: now.getMinutes() }) : null;
               const heroPath = "M 25 148 A 115 115 0 0 1 255 148";
               const heroShown = ready ? calories.percent : 0;
               return (
@@ -3461,12 +3443,9 @@ export default function MacroConsole() {
                     <span className="font-mono" style={{ color: proteinLeft.over ? palette.alert : palette.rust, fontSize: 15 }}>
                       {proteinLeft.amount}g protein {proteinLeft.over ? "over" : "left"}
                     </span>
-                    {pace && (
-                      <div className="font-mono" style={{ color: pace.behind > 0 ? palette.rust : palette.olive, fontSize: 12 }}>{pace.label}</div>
-                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-1" style={{ maxWidth: 260, margin: "0 auto" }}>
-                    <Gauge label="Protein" value={totals.protein} target={targets.protein} unit="g" color={palette.rust} size="sm" ready={ready} markerPercent={pace ? pace.markerPercent : null} paceLabel={pace ? pace.label : null} />
+                    <Gauge label="Protein" value={totals.protein} target={targets.protein} unit="g" color={palette.rust} size="sm" ready={ready} />
                     <Gauge label="Carbs" value={totals.carbs} target={targets.carbs} unit="g" color={palette.olive} size="sm" ready={ready} />
                     <Gauge label="Fat" value={totals.fat} target={targets.fat} unit="g" color={palette.steel} size="sm" ready={ready} />
                     <Gauge label="Fiber" value={totals.fiber} target={targets.fiber} unit="g" color={palette.plum} size="sm" ready={ready} />
