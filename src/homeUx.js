@@ -128,6 +128,11 @@ export function recipeNameKey(name) {
   return String(name || "").replace(/\s*\(\d+(?:\.\d+)?x\)$/i, "").trim().toLowerCase();
 }
 
+// The day's log is the foods array in the order they were added. Meal type is not a section.
+export function dayLogEntries(foods) {
+  return (Array.isArray(foods) ? foods : []).filter((food) => food);
+}
+
 export function collectLoggedFoods(dayRecords, current) {
   const foods = [];
   const currentDate = current && current.date;

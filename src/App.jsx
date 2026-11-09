@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods } from "./homeUx.js";
+import { MAIN_NAV, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods, dayLogEntries } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -405,49 +405,11 @@ function writePinnedRecipeIds(ids) {
   try { localStorage.setItem(PINNED_RECIPES_KEY, JSON.stringify(ids)); } catch (e) {}
 }
 const BODY_EXTRAS_OPEN_KEY = "macroConsole.ui.bodyExtrasOpen";
-const LOG_MEALS_OPEN_KEY = "macroConsole.ui.logMealsOpen";
 function readUiFlag(key) {
   try { return localStorage.getItem(key) === "1"; } catch (e) { return false; }
 }
 function writeUiFlag(key, open) {
   try { localStorage.setItem(key, open ? "1" : "0"); } catch (e) {}
-}
-function readMealOpenMap() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(LOG_MEALS_OPEN_KEY) || "{}");
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (e) {
-    return {};
-  }
-}
-function writeMealOpenMap(map) {
-  try { localStorage.setItem(LOG_MEALS_OPEN_KEY, JSON.stringify(map)); } catch (e) {}
-}
-function foodMealName(food, recipes) {
-  if (food && typeof food.mealType === "string" && food.mealType.trim()) return food.mealType.trim();
-  const raw = String((food && food.name) || "").replace(/\s*\(\d+(?:\.\d+)?x\)$/i, "").trim().toLowerCase();
-  if (!raw) return "Other";
-  const recipe = (recipes || []).find((item) => item && item.name && String(item.name).trim().toLowerCase() === raw);
-  return (recipe && recipe.mealType) || "Other";
-}
-function groupLogFoods(foods, mealTypes, recipes) {
-  const groups = new Map();
-  for (const food of foods || []) {
-    const name = foodMealName(food, recipes);
-    if (!groups.has(name)) groups.set(name, []);
-    groups.get(name).push(food);
-  }
-  const preferred = [...(mealTypes || []), "Other"];
-  const names = [
-    ...preferred.filter((name) => groups.has(name)),
-    ...[...groups.keys()].filter((name) => !preferred.includes(name)),
-  ];
-  return names.map((name) => {
-    const items = groups.get(name);
-    const calories = items.reduce((sum, food) => sum + (Number(food.calories) || 0), 0);
-    const protein = items.reduce((sum, food) => sum + (Number(food.protein) || 0), 0);
-    return { name, foods: items, calories, protein };
-  });
 }
 function latestReading(entries, key) {
   const rows = (entries || []).filter((entry) => entry && entry[key] != null && entry[key] !== "" && Number.isFinite(Number(entry[key])));
@@ -1049,7 +1011,6 @@ export default function MacroConsole() {
   const [recipeBookQuery, setRecipeBookQuery] = useState("");
   const [pinnedRecipeIds, setPinnedRecipeIds] = useState(readPinnedRecipeIds);
   const [bodyExtrasOpen, setBodyExtrasOpen] = useState(() => readUiFlag(BODY_EXTRAS_OPEN_KEY));
-  const [openMeals, setOpenMeals] = useState(readMealOpenMap);
   const [othersHidden, setOthersHidden] = useState(false);
   const [suppTicks, setSuppTicks] = useState({ date: todayStr(), ids: [] });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -3689,39 +3650,8 @@ export default function MacroConsole() {
               )}
 
               {dayData.foods.length > 0 ? (
-                <div className="space-y-2">
-                  {groupLogFoods(dayData.foods, mealTypes, recipes).map((group) => {
-                    const mealOpen = !!openMeals[group.name];
-                    return (
-                      <div key={group.name}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const next = { ...openMeals, [group.name]: !mealOpen };
-                            setOpenMeals(next);
-                            writeMealOpenMap(next);
-                          }}
-                          aria-expanded={mealOpen}
-                          className="w-full flex items-center justify-between gap-2 rounded-lg px-2 text-left"
-                          style={{ minHeight: 44, background: palette.panelAlt, border: `1px solid ${palette.border}` }}
-                        >
-                          <span className="min-w-0">
-                            <span className="font-display uppercase block" style={{ color: palette.text, fontSize: 13, letterSpacing: "0.04em" }}>{group.name}</span>
-                            <span className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>{Math.round(group.calories)} kcal · {Math.round(group.protein)}g protein</span>
-                          </span>
-                          <ChevronDown size={16} style={{ color: palette.textFaint, transform: mealOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
-                        </button>
-                        {mealOpen && (
-                          <div className="space-y-1 mt-1">
-                            <button
-                              type="button"
-                              onClick={() => { setFoodForm({ ...foodForm, mealType: group.name === "Other" ? "" : group.name }); setManualEntryOpen(true); }}
-                              className="font-mono px-2 py-1"
-                              style={{ color: palette.amber, fontSize: 11 }}
-                            >
-                              Add to {group.name}
-                            </button>
-                  {group.foods.map((f) => {
+                <div className="space-y-1">
+                  {dayLogEntries(dayData.foods).map((f) => {
                     const hasComponents = f.components && f.components.length > 0;
                     const isExpanded = expandedFoodId === f.id;
                     return (
@@ -3764,11 +3694,6 @@ export default function MacroConsole() {
                                 </div>
                               ))}
                             </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
                           </div>
                         )}
                       </div>

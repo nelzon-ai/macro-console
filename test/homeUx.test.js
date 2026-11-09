@@ -8,6 +8,7 @@ import {
   usualRecipes,
   searchRecipes,
   collectLoggedFoods,
+  dayLogEntries,
   portionsLeftLabel,
   decrementPortion,
   leftoverVisible,
@@ -61,6 +62,19 @@ test("horizontal swipes change the day and vertical drags do not", () => {
   assert.equal(swipeDayDelta(80, 4), -1);
   assert.equal(swipeDayDelta(-20, 0), 0);
   assert.equal(swipeDayDelta(-40, 80), 0);
+});
+
+test("a day's log stays in the order items were logged", () => {
+  const foods = [
+    { id: "first", name: "Example oats", mealType: "Breakfast", calories: 300, protein: 12, carbs: 40, fat: 6, fiber: 5 },
+    { id: "second", name: "Example chili", mealType: "Dinner", calories: 400, protein: 30, carbs: 35, fat: 12, fiber: 8 },
+    { id: "third", name: "Example toast", mealType: "Breakfast", calories: 150, protein: 6, carbs: 22, fat: 3, fiber: 2 },
+  ];
+  const rows = dayLogEntries(foods);
+  assert.deepEqual(rows.map((food) => food.id), ["first", "second", "third"]);
+  assert.equal(rows[0].mealType, "Breakfast");
+  assert.equal(rows[1].mealType, "Dinner");
+  assert.equal(dayLogEntries(null).length, 0);
 });
 
 test("usuals are pinned recipes plus the names logged most often", () => {
