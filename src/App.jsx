@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, remainder, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods } from "./homeUx.js";
+import { MAIN_NAV, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -3338,7 +3338,6 @@ export default function MacroConsole() {
             {/* Hero calorie gauge — the one focal point; everything else stays quiet */}
             {(() => {
               const calories = calorieProgress(totals.calories, targets.calories);
-              const proteinLeft = remainder(totals.protein, targets.protein);
               const heroPath = "M 25 148 A 115 115 0 0 1 255 148";
               const heroShown = ready ? calories.percent : 0;
               return (
@@ -3361,14 +3360,9 @@ export default function MacroConsole() {
                       </span>
                     </div>
                   </div>
-                  <div className="text-center -mt-1">
+                  <div className="text-center -mt-1 mb-2">
                     <span className="font-mono" style={{ color: calories.over ? palette.alert : palette.textFaint, fontSize: 11 }}>
                       {calories.over ? `+${calories.overBy} kcal over` : `${calories.toGo.toLocaleString()} kcal to go`}
-                    </span>
-                  </div>
-                  <div className="text-center -mt-1 mb-2">
-                    <span className="font-mono" style={{ color: proteinLeft.over ? palette.alert : palette.rust, fontSize: 15 }}>
-                      {proteinLeft.amount}g protein {proteinLeft.over ? "over" : "left"}
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-1" style={{ maxWidth: 260, margin: "0 auto" }}>
