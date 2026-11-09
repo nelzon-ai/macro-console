@@ -8,6 +8,10 @@ import {
   usualRecipes,
   searchRecipes,
   collectLoggedFoods,
+  dayLogEntries,
+  scaleLoggedFood,
+  withEditedMacros,
+  createDaySaver,
   portionsLeftLabel,
   decrementPortion,
   leftoverVisible,
@@ -61,6 +65,81 @@ test("horizontal swipes change the day and vertical drags do not", () => {
   assert.equal(swipeDayDelta(80, 4), -1);
   assert.equal(swipeDayDelta(-20, 0), 0);
   assert.equal(swipeDayDelta(-40, 80), 0);
+});
+
+test("a day's log stays in the order items were logged", () => {
+  const foods = [
+    { id: "first", name: "Example oats", mealType: "Breakfast", calories: 300, protein: 12, carbs: 40, fat: 6, fiber: 5 },
+    { id: "second", name: "Example chili", mealType: "Dinner", calories: 400, protein: 30, carbs: 35, fat: 12, fiber: 8 },
+    { id: "third", name: "Example toast", mealType: "Breakfast", calories: 150, protein: 6, carbs: 22, fat: 3, fiber: 2 },
+  ];
+  const rows = dayLogEntries(foods);
+  assert.deepEqual(rows.map((food) => food.id), ["first", "second", "third"]);
+  assert.equal(rows[0].mealType, "Breakfast");
+  assert.equal(rows[1].mealType, "Dinner");
+  assert.equal(dayLogEntries(null).length, 0);
+});
+
+test("a portion change scales the same entry from its original amounts", () => {
+  const food = {
+    id: "oats",
+    name: "Example oats",
+    calories: 200,
+    protein: 10,
+    carbs: 30,
+    fat: 4,
+    fiber: 2,
+    mealType: "Breakfast",
+    updatedAt: "2026-11-09T10:00:00.000Z",
+    components: [{ id: "grain", name: "Example grain", calories: 200, protein: 10, carbs: 30, fat: 4, fiber: 2 }],
+  };
+  const twice = scaleLoggedFood(food, 2, "2026-11-09T12:00:00.000Z");
+  assert.equal(twice.id, "oats");
+  assert.equal(twice.name, "Example oats");
+  assert.equal(twice.mealType, "Breakfast");
+  assert.equal(twice.calories, 400);
+  assert.equal(twice.protein, 20);
+  assert.equal(twice.components[0].calories, 400);
+  assert.equal(twice.updatedAt > food.updatedAt, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(twice, "portionsLeft"), false);
+  const half = scaleLoggedFood(twice, 0.5, "2026-11-09T12:05:00.000Z");
+  assert.equal(half.id, "oats");
+  assert.equal(half.calories, 100);
+  assert.equal(half.protein, 5);
+  assert.equal(half.components[0].calories, 100);
+  assert.equal(scaleLoggedFood(food, 0, "2026-11-09T12:00:00.000Z"), food);
+  const edited = withEditedMacros(twice, { name: "Example oats", calories: 250, protein: 12, carbs: 20, fat: 8, fiber: 3 }, "2026-11-09T13:00:00.000Z");
+  assert.equal(edited.id, "oats");
+  assert.equal(edited.portion, undefined);
+  assert.equal(edited.portionBase, undefined);
+  const again = scaleLoggedFood(edited, 2, "2026-11-09T13:05:00.000Z");
+  assert.equal(again.calories, 500);
+  assert.equal(again.protein, 24);
+});
+
+test("a day save waits, then writes the latest snapshot, and a flush writes immediately", () => {
+  const writes = [];
+  const syncs = [];
+  let queued = null;
+  const saver = createDaySaver({
+    write: (day, date) => writes.push([date, day.foods.map((food) => food.id)]),
+    sync: () => syncs.push("sync"),
+    delay: 700,
+    schedule: (fn) => { queued = fn; return 1; },
+    cancel: () => { queued = null; },
+  });
+  saver.schedule({ foods: [{ id: "a" }] }, "2026-11-09");
+  saver.schedule({ foods: [{ id: "a" }, { id: "b" }] }, "2026-11-09");
+  assert.equal(writes.length, 0);
+  queued();
+  assert.deepEqual(writes, [["2026-11-09", ["a", "b"]]]);
+  assert.deepEqual(syncs, ["sync"]);
+  saver.schedule({ foods: [{ id: "c" }] }, "2026-11-08");
+  assert.equal(queued != null, true);
+  saver.flush();
+  assert.deepEqual(writes[1], ["2026-11-08", ["c"]]);
+  assert.equal(syncs.length, 2);
+  assert.equal(saver.flush(), null);
 });
 
 test("usuals are pinned recipes plus the names logged most often", () => {

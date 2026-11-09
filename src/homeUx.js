@@ -128,6 +128,120 @@ export function recipeNameKey(name) {
   return String(name || "").replace(/\s*\(\d+(?:\.\d+)?x\)$/i, "").trim().toLowerCase();
 }
 
+// The day's log is the foods array in the order they were added. Meal type is not a section.
+export function dayLogEntries(foods) {
+  return (Array.isArray(foods) ? foods : []).filter((food) => food);
+}
+
+export const PORTION_PRESETS = [0.5, 1, 1.5, 2];
+
+function portionBaseOf(food) {
+  if (food && food.portionBase && typeof food.portionBase === "object") return food.portionBase;
+  const components = Array.isArray(food && food.components) ? food.components.map((item) => ({
+    id: item.id,
+    name: item.name,
+    calories: Number(item.calories) || 0,
+    protein: Number(item.protein) || 0,
+    carbs: Number(item.carbs) || 0,
+    fat: Number(item.fat) || 0,
+    fiber: Number(item.fiber) || 0,
+  })) : undefined;
+  return {
+    calories: Number(food && food.calories) || 0,
+    protein: Number(food && food.protein) || 0,
+    carbs: Number(food && food.carbs) || 0,
+    fat: Number(food && food.fat) || 0,
+    fiber: Number(food && food.fiber) || 0,
+    components,
+  };
+}
+
+function scaleMacro(value, multiplier) {
+  return Math.round((Number(value) || 0) * multiplier);
+}
+
+// Scales from the entry's original amounts. Later presets do not compound.
+// The id is kept. Recipe leftovers are not part of this update.
+export function scaleLoggedFood(food, multiplier, now) {
+  const mult = Number(multiplier);
+  if (!food || !Number.isFinite(mult) || mult <= 0) return food;
+  const base = portionBaseOf(food);
+  const next = {
+    ...food,
+    id: food.id,
+    calories: scaleMacro(base.calories, mult),
+    protein: scaleMacro(base.protein, mult),
+    carbs: scaleMacro(base.carbs, mult),
+    fat: scaleMacro(base.fat, mult),
+    fiber: scaleMacro(base.fiber, mult),
+    portion: mult,
+    portionBase: base,
+    updatedAt: now || new Date().toISOString(),
+  };
+  if (Array.isArray(base.components)) {
+    next.components = base.components.map((item) => ({
+      ...item,
+      calories: scaleMacro(item.calories, mult),
+      protein: scaleMacro(item.protein, mult),
+      carbs: scaleMacro(item.carbs, mult),
+      fat: scaleMacro(item.fat, mult),
+      fiber: scaleMacro(item.fiber, mult),
+    }));
+  }
+  return next;
+}
+
+// A manual macro edit becomes the new base. The portion multiplier starts over.
+export function withEditedMacros(food, macros, now) {
+  const next = {
+    ...food,
+    name: macros.name != null ? macros.name : food.name,
+    calories: Number(macros.calories) || 0,
+    protein: Number(macros.protein) || 0,
+    carbs: Number(macros.carbs) || 0,
+    fat: Number(macros.fat) || 0,
+    fiber: Number(macros.fiber) || 0,
+    updatedAt: now || new Date().toISOString(),
+  };
+  delete next.portion;
+  delete next.portionBase;
+  return next;
+}
+
+// One pending day snapshot. A later schedule replaces the earlier one.
+// flush writes immediately so a day change or a closing app does not drop it.
+export function createDaySaver({ write, sync, delay = 700, schedule = setTimeout, cancel = clearTimeout }) {
+  let timer = null;
+  let pending = null;
+  function run() {
+    timer = null;
+    const job = pending;
+    pending = null;
+    if (!job) return null;
+    const wrote = write(job.day, job.date);
+    if (sync) sync();
+    return wrote;
+  }
+  return {
+    schedule(day, date) {
+      pending = { day, date };
+      if (timer) cancel(timer);
+      timer = schedule(run, delay);
+    },
+    flush() {
+      if (timer) cancel(timer);
+      timer = null;
+      if (!pending) return null;
+      return run();
+    },
+    drop() {
+      if (timer) cancel(timer);
+      timer = null;
+      pending = null;
+    },
+  };
+}
+
 export function collectLoggedFoods(dayRecords, current) {
   const foods = [];
   const currentDate = current && current.date;
