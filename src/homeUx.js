@@ -54,6 +54,58 @@ export function batchState(recipe) {
   return { total: rounded, left };
 }
 
+// Cook day plus the next two days. Hidden once the calendar age reaches 3.
+export const LEFTOVER_VISIBLE_DAYS = 3;
+
+export function calendarDate(value) {
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "";
+    return formatLocalDate(value);
+  }
+  const text = String(value == null ? "" : value).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) {
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) return "";
+    return formatLocalDate(parsed);
+  }
+  return "";
+}
+
+function formatLocalDate(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+export function daysBetween(start, today) {
+  const from = calendarDate(start);
+  const to = calendarDate(today);
+  if (!from || !to) return null;
+  const [ay, am, ad] = from.split("-").map(Number);
+  const [by, bm, bd] = to.split("-").map(Number);
+  return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400000);
+}
+
+// Explicit cook date, otherwise the recipe's updatedAt. Blank when neither is a date.
+export function batchStartDate(recipe) {
+  if (!recipe) return "";
+  return calendarDate(recipe.batchStartedAt) || calendarDate(recipe.updatedAt) || "";
+}
+
+// Shown while a portion remains and the batch is younger than 3 calendar days.
+// No date at all is not treated as old.
+export function leftoverVisible(recipe, today) {
+  const batch = batchState(recipe);
+  if (!batch || batch.left <= 0) return false;
+  const start = batchStartDate(recipe);
+  if (!start) return true;
+  const age = daysBetween(start, today);
+  if (age == null || age < 0) return true;
+  return age < LEFTOVER_VISIBLE_DAYS;
+}
+
 export function portionsLeftLabel(recipe) {
   const batch = batchState(recipe);
   if (!batch) return "";
@@ -126,13 +178,28 @@ export function searchRecipes(recipes, query) {
   return (recipes || []).filter((recipe) => recipe && recipeNameKey(recipe.name).includes(q));
 }
 
-export function batchFieldsFromForm(raw, previous) {
+export function batchFieldsFromForm(raw, previous, today) {
   const text = String(raw == null ? "" : raw).trim();
-  if (!text) return { batchPortions: null, portionsLeft: null };
+  if (!text) return { batchPortions: null, portionsLeft: null, batchStartedAt: null };
   const total = Math.round(Number(text));
-  if (!Number.isFinite(total) || total <= 0) return { batchPortions: null, portionsLeft: null };
+  if (!Number.isFinite(total) || total <= 0) return { batchPortions: null, portionsLeft: null, batchStartedAt: null };
   const prevTotal = previous && Number(previous.batchPortions);
   const sameBatch = previous && Number.isFinite(prevTotal) && Math.round(prevTotal) === total && previous.portionsLeft != null;
   const left = sameBatch ? Math.max(0, Math.min(total, Math.round(Number(previous.portionsLeft)))) : total;
-  return { batchPortions: total, portionsLeft: left };
+  const started = sameBatch
+    ? (calendarDate(previous && previous.batchStartedAt) || null)
+    : (calendarDate(today) || formatLocalDate(new Date()));
+  return { batchPortions: total, portionsLeft: left, batchStartedAt: started };
+}
+
+// A newer recipe edit must not drop the cook date of the same batch.
+export function preserveBatchStartedAt(winner, loser) {
+  if (!winner || calendarDate(winner.batchStartedAt)) return winner;
+  const kept = calendarDate(loser && loser.batchStartedAt);
+  if (!kept) return winner;
+  const winnerTotal = Number(winner.batchPortions);
+  const loserTotal = Number(loser && loser.batchPortions);
+  if (!Number.isFinite(winnerTotal) || winnerTotal <= 0) return winner;
+  if (!Number.isFinite(loserTotal) || Math.round(winnerTotal) !== Math.round(loserTotal)) return winner;
+  return { ...winner, batchStartedAt: kept };
 }
