@@ -6,7 +6,7 @@ import {
 import {
   ChevronLeft, ChevronRight, ChevronDown, Settings, Flame, Scale, Droplets,
   Footprints, Dumbbell, Plus, Minus, X, Loader2, Lock, Unlock, BookOpen, LayoutDashboard,
-  TrendingUp, Copy, Send, Sparkles, Upload, Camera, Activity, Ruler, Pencil, BookmarkPlus, Images, Play, Pause, Check, Volume2, VolumeX, Pill, Cloud
+  TrendingUp, Copy, Send, Sparkles, Upload, Camera, Activity, Ruler, Pencil, BookmarkPlus, Pin, Images, Play, Pause, Check, Volume2, VolumeX, Pill, Cloud
 } from "lucide-react";
 import {
   DEFAULT_REPO, DEFAULT_BRANCH, loadSyncConfig, loadSyncStatus, saveSyncConfig, clearSyncToken,
@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, remainder, calorieProgress, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm } from "./homeUx.js";
+import { MAIN_NAV, remainder, calorieProgress, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -391,19 +391,18 @@ function formatMeasure(value) {
 }
 
 // UI preference only. Not a data key, and not included in backups or sync.
-const LOG_RECIPES_OPEN_KEY = "macroConsole.ui.logRecipesOpen";
 const WORKOUT_SUMMARY_HIDDEN_KEY = "macroConsole.ui.workoutSummaryHidden";
-function readLogRecipesOpen() {
+const PINNED_RECIPES_KEY = "macroConsole.ui.pinnedRecipes";
+function readPinnedRecipeIds() {
   try {
-    return localStorage.getItem(LOG_RECIPES_OPEN_KEY) === "1";
+    const parsed = JSON.parse(localStorage.getItem(PINNED_RECIPES_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.map((id) => String(id)).filter(Boolean) : [];
   } catch (e) {
-    return false;
+    return [];
   }
 }
-function writeLogRecipesOpen(open) {
-  try {
-    localStorage.setItem(LOG_RECIPES_OPEN_KEY, open ? "1" : "0");
-  } catch (e) {}
+function writePinnedRecipeIds(ids) {
+  try { localStorage.setItem(PINNED_RECIPES_KEY, JSON.stringify(ids)); } catch (e) {}
 }
 const BODY_EXTRAS_OPEN_KEY = "macroConsole.ui.bodyExtrasOpen";
 const LOG_MEALS_OPEN_KEY = "macroConsole.ui.logMealsOpen";
@@ -784,88 +783,6 @@ function Button({ children, onClick, variant = "primary", disabled, full, size =
   );
 }
 
-function RecipeCard({ recipe, expanded, onToggle, onEdit, onDelete, onLog, onLogPortion, locked }) {
-  const [logServings, setLogServings] = useState("1");
-  const hasDetails = (recipe.ingredients && recipe.ingredients.length > 0) || recipe.method;
-  const batch = batchState(recipe);
-  return (
-    <div className="rounded-lg border overflow-hidden" style={{ borderColor: palette.border, background: palette.panelAlt }}>
-      <button onClick={onToggle} className="w-full flex items-center justify-between px-3 py-2 text-left">
-        <div className="min-w-0 pr-2">
-          <div className="text-sm truncate" style={{ color: palette.text }}>{recipe.name}</div>
-          <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>
-            {recipe.calories} cal/serving · {recipe.servings || 1} serving{(recipe.servings || 1) === 1 ? "" : "s"}
-            {batch ? ` · ${portionsLeftLabel(recipe)}` : ""}
-          </div>
-        </div>
-        <ChevronDown size={16} style={{ color: palette.textFaint, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
-      </button>
-      {expanded && (
-        <div className="px-3 pb-3">
-          <div className="font-mono mb-2" style={{ color: palette.textMuted, fontSize: 11 }}>
-            {recipe.calories} cal · {recipe.protein}P {recipe.carbs}C {recipe.fat}F {recipe.fiber}Fi <span style={{ color: palette.textFaint }}>per serving</span>
-          </div>
-          {recipe.ingredients && recipe.ingredients.length > 0 && (
-            <div className="mb-2">
-              <div className="font-display uppercase mb-1" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.08em" }}>Ingredients</div>
-              <ul style={{ color: palette.text, fontSize: 13 }}>
-                {recipe.ingredients.map((i) => (
-                  <li key={i.id}>• {i.amount}{i.unit} {i.name}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {recipe.method && (
-            <div className="mb-2">
-              <div className="font-display uppercase mb-1" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.08em" }}>Method</div>
-              <div style={{ color: palette.text, fontSize: 13, whiteSpace: "pre-wrap" }}>{recipe.method}</div>
-            </div>
-          )}
-          {!hasDetails && (
-            <div className="font-mono mb-2" style={{ color: palette.textFaint, fontSize: 11 }}>No ingredients or method saved — just the macros.</div>
-          )}
-          <div className="flex items-center gap-2 mb-2 flex-wrap">
-            <span className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>Servings:</span>
-            <div className="flex gap-1">
-              {["0.5", "1", "1.5", "2"].map((v) => (
-                <button
-                  key={v} onClick={() => setLogServings(v)}
-                  className="font-mono rounded px-2 py-1"
-                  style={{
-                    fontSize: 11,
-                    background: logServings === v ? palette.amber : palette.panel,
-                    color: logServings === v ? "#1B1815" : palette.textMuted,
-                    border: `1px solid ${logServings === v ? palette.amber : palette.border}`,
-                  }}
-                >
-                  {v}x
-                </button>
-              ))}
-            </div>
-            <input
-              type="number" inputMode="decimal" min="0" step="0.5" value={logServings}
-              onChange={(e) => setLogServings(e.target.value)}
-              className="font-mono rounded-lg px-2 py-1 text-sm outline-none border"
-              style={{ width: 56, background: palette.panel, borderColor: palette.border, color: palette.text }}
-            />
-          </div>
-          {batch && (
-            <div className="flex items-center justify-between gap-2 mb-2" style={{ flexWrap: "wrap" }}>
-              <span className="font-mono" style={{ color: batch.left > 0 ? palette.amber : palette.textFaint, fontSize: 11 }}>{portionsLeftLabel(recipe)}</span>
-              <Button onClick={onLogPortion} disabled={locked || batch.left <= 0} size="sm">Log a portion</Button>
-            </div>
-          )}
-          <div className="flex gap-2 mt-1">
-            <Button onClick={() => onLog(Number(logServings) || 1)} disabled={locked} size="sm" grow>Log</Button>
-            <Button onClick={onEdit} variant="ghost" size="sm" grow>Edit</Button>
-            <Button onClick={onDelete} variant="danger" size="sm" grow>Delete</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ChatThread({ messages, busy, emptyHint }) {
   return (
     <div className="space-y-2 mb-2 max-h-64 overflow-y-auto">
@@ -1130,11 +1047,9 @@ export default function MacroConsole() {
   const [recipeModalOpen, setRecipeModalOpen] = useState(false);
   const [recipeForm, setRecipeForm] = useState(emptyRecipeForm());
   const [recipeBookQuery, setRecipeBookQuery] = useState("");
-  const [logRecipesOpen, setLogRecipesOpen] = useState(readLogRecipesOpen);
+  const [pinnedRecipeIds, setPinnedRecipeIds] = useState(readPinnedRecipeIds);
   const [bodyExtrasOpen, setBodyExtrasOpen] = useState(() => readUiFlag(BODY_EXTRAS_OPEN_KEY));
   const [openMeals, setOpenMeals] = useState(readMealOpenMap);
-  const [expandedRecipeId, setExpandedRecipeId] = useState(null);
-  const [collapsedSections, setCollapsedSections] = useState({});
   const [othersHidden, setOthersHidden] = useState(false);
   const [suppTicks, setSuppTicks] = useState({ date: todayStr(), ids: [] });
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -2306,6 +2221,17 @@ export default function MacroConsole() {
     setDayData(newDay);
     persist(newDay);
     showToast(mult === 1 ? "Added to log" : `Added ${mult} servings to log`);
+  }
+
+  function togglePinnedRecipe(recipe) {
+    const id = recipe && recipe.id != null ? String(recipe.id) : "";
+    if (!id) return;
+    setPinnedRecipeIds((current) => {
+      const has = current.includes(id);
+      const next = has ? current.filter((item) => item !== id) : [...current, id];
+      writePinnedRecipeIds(next);
+      return next;
+    });
   }
 
   function logBatchPortion(recipe) {
@@ -3890,90 +3816,95 @@ export default function MacroConsole() {
             )}
 
             <div className="mt-2 pt-4 border-t" style={{ borderColor: palette.border }}>
-              <button
-                type="button"
-                onClick={() => {
-                  const next = !logRecipesOpen;
-                  setLogRecipesOpen(next);
-                  writeLogRecipesOpen(next);
-                }}
-                aria-expanded={logRecipesOpen}
-                aria-controls="log-recipe-book"
-                className="w-full flex items-center justify-between gap-3 rounded-lg px-3 font-display uppercase"
-                style={{
-                  minHeight: 48,
-                  letterSpacing: "0.06em",
-                  fontSize: 13,
-                  background: palette.panel,
-                  color: palette.text,
-                  border: `1px solid ${palette.border}`,
-                }}
-              >
-                <span>{logRecipesOpen ? "Hide recipes" : "Show recipes"}</span>
-                <ChevronDown size={16} style={{ color: palette.textFaint, transform: logRecipesOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
-              </button>
-            </div>
-            {logRecipesOpen && (
-            <div id="log-recipe-book" className="mt-3">
-            <input
-              type="text" placeholder="Search recipes" value={recipeBookQuery}
-              onChange={(e) => setRecipeBookQuery(e.target.value)}
-              className="w-full rounded-lg px-3 py-2 text-sm mb-3 outline-none border"
-              style={{ background: palette.panelAlt, borderColor: palette.border, color: palette.text }}
-            />
-            <Button onClick={openNewRecipe} full>
-              <span className="flex items-center justify-center gap-1"><Plus size={14} /> New recipe</span>
-            </Button>
-
-            {(() => {
-              const filtered = recipes.filter((r) => r.name.toLowerCase().includes(recipeBookQuery.trim().toLowerCase()));
-              if (filtered.length === 0) {
+              {(() => {
+                const loggedFoods = collectLoggedFoods(daysRef.current, { date: dateStr, foods: dayData.foods });
+                const usuals = usualRecipes(recipes, loggedFoods, pinnedRecipeIds);
+                const found = searchRecipes(recipes, recipeBookQuery);
+                const query = recipeBookQuery.trim();
                 return (
-                  <div className="text-center font-mono py-8" style={{ color: palette.textFaint, fontSize: 12 }}>
-                    {recipes.length === 0 ? "No recipes saved yet. Log a meal above and bookmark it, or add one here." : "No recipes match that search."}
-                  </div>
-                );
-              }
-              const sections = [...mealTypesForDisplay(mealTypes, recipes), "Uncategorized"].map((mt) => {
-                const group = filtered.filter((r) => (r.mealType || "Uncategorized") === mt);
-                if (group.length === 0) return null;
-                const isCollapsed = collapsedSections[mt] !== false;
-                return (
-                  <div key={mt} className="mt-5">
-                    <div className="flex items-center justify-between mb-2">
-                      <button
-                        onClick={() => setCollapsedSections({ ...collapsedSections, [mt]: !isCollapsed })}
-                        className="flex-1 flex items-center justify-between"
-                      >
-                        <div className="flex items-center gap-1">
-                          <ChevronDown size={14} style={{ color: palette.textFaint, transform: isCollapsed ? "rotate(-90deg)" : "none", transition: "transform 0.2s ease" }} />
-                          <Label>{mt}</Label>
+                  <>
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <Label>Recipes</Label>
+                      <span className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>{recipes.length} saved</span>
+                    </div>
+                    <Button onClick={openNewRecipe} full>
+                      <span className="flex items-center justify-center gap-1"><Plus size={14} /> New recipe</span>
+                    </Button>
+                    {usuals.length > 0 && (
+                      <div className="mt-3">
+                        <div className="font-display uppercase" style={{ color: palette.textFaint, fontSize: 10, letterSpacing: "0.06em" }}>Usuals</div>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {usuals.map((recipe) => {
+                            const pinned = pinnedRecipeIds.includes(String(recipe.id));
+                            return (
+                              <span key={recipe.id} className="inline-flex items-center max-w-full rounded-full" style={{ background: palette.panelAlt, border: `1px solid ${pinned ? palette.amber : palette.border}` }}>
+                                <button
+                                  type="button"
+                                  onClick={() => logRecipeToday(recipe, 1)}
+                                  disabled={dayData.locked}
+                                  className="truncate px-2 py-1 text-sm text-left"
+                                  style={{ color: palette.text, maxWidth: 160 }}
+                                >
+                                  {recipe.name}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => togglePinnedRecipe(recipe)}
+                                  aria-label={pinned ? `Unpin ${recipe.name}` : `Pin ${recipe.name}`}
+                                  className="flex items-center justify-center"
+                                  style={{ color: pinned ? palette.amber : palette.textFaint, width: 28, height: 28 }}
+                                >
+                                  <Pin size={12} />
+                                </button>
+                              </span>
+                            );
+                          })}
                         </div>
-                        <span className="font-mono" style={{ color: palette.textFaint, fontSize: 11 }}>{group.length}</span>
-                      </button>
-                    </div>
-                    {!isCollapsed && (
-                    <div className="space-y-2">
-                      {group.map((r) => (
-                        <RecipeCard
-                          key={r.id} recipe={r} expanded={expandedRecipeId === r.id}
-                          onToggle={() => setExpandedRecipeId(expandedRecipeId === r.id ? null : r.id)}
-                          onEdit={() => openEditRecipe(r)}
-                          onDelete={() => deleteRecipe(r.id)}
-                          onLog={(servings) => logRecipeToday(r, servings)}
-                          onLogPortion={() => logBatchPortion(r)}
-                          locked={dayData.locked}
-                        />
-                      ))}
-                    </div>
+                      </div>
                     )}
-                  </div>
+                    <input
+                      type="text"
+                      placeholder="Search saved recipes"
+                      value={recipeBookQuery}
+                      onChange={(e) => setRecipeBookQuery(e.target.value)}
+                      aria-label="Search saved recipes"
+                      className="w-full rounded-lg px-3 py-2 text-sm mt-3 outline-none border"
+                      style={{ background: palette.panelAlt, borderColor: palette.border, color: palette.text }}
+                    />
+                    {query && found.length === 0 && (
+                      <div className="font-mono mt-2" style={{ color: palette.textFaint, fontSize: 11 }}>No recipes match that search.</div>
+                    )}
+                    {query && found.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        {found.map((recipe) => {
+                          const pinned = pinnedRecipeIds.includes(String(recipe.id));
+                          return (
+                            <div key={recipe.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5" style={{ background: palette.panelAlt }}>
+                              <button type="button" onClick={() => logRecipeToday(recipe, 1)} disabled={dayData.locked} className="min-w-0 flex-1 text-left">
+                                <div className="text-sm truncate" style={{ color: palette.text }}>{recipe.name}</div>
+                                <div className="font-mono" style={{ color: palette.textFaint, fontSize: 10 }}>{recipe.calories} cal</div>
+                              </button>
+                              <button type="button" onClick={() => togglePinnedRecipe(recipe)} aria-label={pinned ? `Unpin ${recipe.name}` : `Pin ${recipe.name}`} className="flex items-center justify-center" style={{ color: pinned ? palette.amber : palette.textFaint, width: 32, height: 32 }}>
+                                <Pin size={14} />
+                              </button>
+                              <button type="button" onClick={() => openEditRecipe(recipe)} aria-label={`Edit ${recipe.name}`} className="flex items-center justify-center" style={{ width: 32, height: 32 }}>
+                                <Pencil size={14} style={{ color: palette.textFaint }} />
+                              </button>
+                              <button type="button" onClick={() => deleteRecipe(recipe.id)} aria-label={`Delete ${recipe.name}`} className="flex items-center justify-center" style={{ width: 32, height: 32 }}>
+                                <X size={14} style={{ color: palette.textFaint }} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {!query && recipes.length === 0 && (
+                      <div className="font-mono mt-2" style={{ color: palette.textFaint, fontSize: 11 }}>No recipes yet. Add one above, or bookmark a logged meal.</div>
+                    )}
+                  </>
                 );
-              });
-              return <>{sections}</>;
-            })()}
+              })()}
             </div>
-            )}
             <div className="mt-6 pt-4 border-t" style={{ borderColor: palette.border }} />
 
             {!AI_ENABLED ? (

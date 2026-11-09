@@ -5,6 +5,9 @@ import {
   remainder,
   calorieProgress,
   swipeDayDelta,
+  usualRecipes,
+  searchRecipes,
+  collectLoggedFoods,
   portionsLeftLabel,
   decrementPortion,
   batchFieldsFromForm,
@@ -57,6 +60,30 @@ test("horizontal swipes change the day and vertical drags do not", () => {
   assert.equal(swipeDayDelta(80, 4), -1);
   assert.equal(swipeDayDelta(-20, 0), 0);
   assert.equal(swipeDayDelta(-40, 80), 0);
+});
+
+test("usuals are pinned recipes plus the names logged most often", () => {
+  const recipes = [
+    { id: "oats", name: "Example oats" },
+    { id: "chili", name: "Example chili" },
+    { id: "soup", name: "Example soup" },
+    { id: "rare", name: "Example rare" },
+  ];
+  const foods = [
+    { name: "Example chili" },
+    { name: "Example chili (2x)" },
+    { name: "Example oats" },
+    { name: "Example soup" },
+    { name: "Example soup" },
+    { name: "Example soup" },
+  ];
+  const usuals = usualRecipes(recipes, foods, ["oats"], 3);
+  assert.deepEqual(usuals.map((recipe) => recipe.id), ["oats", "soup", "chili"]);
+  assert.equal(searchRecipes(recipes, "").length, 0);
+  assert.deepEqual(searchRecipes(recipes, "chi").map((recipe) => recipe.id), ["chili"]);
+  const days = [{ date: "2026-01-01", day: { foods: [{ name: "Example oats" }] } }];
+  const collected = collectLoggedFoods(days, { date: "2026-01-02", foods: [{ name: "Example soup" }] });
+  assert.deepEqual(collected.map((food) => food.name), ["Example oats", "Example soup"]);
 });
 
 test("a batch shows portions left and logging one decrements it", () => {
