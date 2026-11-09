@@ -3,6 +3,7 @@
 // the entry. Conflicting edits keep the winner in the live log and the other
 // copy under `conflicts`, which is stored in the private repo.
 
+import { calendarDate, preserveBatchStartedAt } from "./homeUx.js";
 import { normalizeWeeklyTarget, normalizeWorkoutDays } from "./planSettings.js";
 
 const MACRO_KEYS = ["calories", "protein", "carbs", "fat", "fiber"];
@@ -310,7 +311,8 @@ function mergeWholeEntry(local, remote, conflicts, collection, identity, date, n
     reason: "edit",
     dropped: clone(loser),
   });
-  return { ...clone(winner), updatedAt: chooseUpdatedAt(local.updatedAt, remote.updatedAt, now, side) };
+  const merged = { ...clone(winner), updatedAt: chooseUpdatedAt(local.updatedAt, remote.updatedAt, now, side) };
+  return collection === "recipes" ? preserveBatchStartedAt(merged, loser) : merged;
 }
 
 function mergeKeyedCollection(localEntries, remoteEntries, keyFn, mergePair, collection, conflicts, tombstones, now, dateOf) {
@@ -1023,6 +1025,7 @@ export function documentFromInbox(inbox, now) {
         recipe.batchPortions = Math.round(batchPortions);
         const portionsLeft = Number(entry.portionsLeft);
         recipe.portionsLeft = Number.isFinite(portionsLeft) ? Math.max(0, Math.round(portionsLeft)) : recipe.batchPortions;
+        recipe.batchStartedAt = calendarDate(entry.batchStartedAt) || calendarDate(stamp) || calendarDate(now);
       }
       doc.recipes.push(recipe);
     }

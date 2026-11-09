@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, remainder, calorieProgress, swipeDayDelta, batchState, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods } from "./homeUx.js";
+import { MAIN_NAV, remainder, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -2180,7 +2180,7 @@ export default function MacroConsole() {
   async function saveRecipeForm() {
     if (!recipeForm.name.trim()) return;
     const previous = recipes.find((item) => item.id === recipeForm.id);
-    const batch = batchFieldsFromForm(recipeForm.batchPortions, previous);
+    const batch = batchFieldsFromForm(recipeForm.batchPortions, previous, todayStr());
     const recipe = {
       id: recipeForm.id || genId(),
       name: recipeForm.name.trim(),
@@ -2202,6 +2202,7 @@ export default function MacroConsole() {
     if (batch.batchPortions != null) {
       recipe.batchPortions = batch.batchPortions;
       recipe.portionsLeft = batch.portionsLeft;
+      if (batch.batchStartedAt) recipe.batchStartedAt = batch.batchStartedAt;
     }
     await persistFullRecipe(recipe);
     setRecipeModalOpen(false);
@@ -3795,11 +3796,11 @@ export default function MacroConsole() {
             </>
             )}
 
-            {recipes.some((recipe) => batchState(recipe)) && (
+            {recipes.some((recipe) => leftoverVisible(recipe, dateStr)) && (
               <Panel className="mb-3">
                 <Label>Leftovers</Label>
                 <div className="space-y-2 mt-2">
-                  {recipes.filter((recipe) => batchState(recipe)).map((recipe) => {
+                  {recipes.filter((recipe) => leftoverVisible(recipe, dateStr)).map((recipe) => {
                     const batch = batchState(recipe);
                     return (
                       <div key={recipe.id}>

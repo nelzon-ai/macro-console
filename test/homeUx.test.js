@@ -10,6 +10,7 @@ import {
   collectLoggedFoods,
   portionsLeftLabel,
   decrementPortion,
+  leftoverVisible,
   batchFieldsFromForm,
 } from "../src/homeUx.js";
 import { syncIndicator } from "../src/githubSync.js";
@@ -101,12 +102,49 @@ test("a batch shows portions left and logging one decrements it", () => {
 });
 
 test("editing a batch keeps portions already used", () => {
-  const fresh = batchFieldsFromForm("4", null);
-  assert.deepEqual(fresh, { batchPortions: 4, portionsLeft: 4 });
-  const kept = batchFieldsFromForm("4", { batchPortions: 4, portionsLeft: 2 });
-  assert.deepEqual(kept, { batchPortions: 4, portionsLeft: 2 });
-  const cleared = batchFieldsFromForm("", { batchPortions: 4, portionsLeft: 2 });
-  assert.deepEqual(cleared, { batchPortions: null, portionsLeft: null });
+  const fresh = batchFieldsFromForm("4", null, "2026-11-09");
+  assert.deepEqual(fresh, { batchPortions: 4, portionsLeft: 4, batchStartedAt: "2026-11-09" });
+  const kept = batchFieldsFromForm("4", { batchPortions: 4, portionsLeft: 2, batchStartedAt: "2026-11-07" }, "2026-11-09");
+  assert.deepEqual(kept, { batchPortions: 4, portionsLeft: 2, batchStartedAt: "2026-11-07" });
+  const reset = batchFieldsFromForm("6", { batchPortions: 4, portionsLeft: 1, batchStartedAt: "2026-11-01" }, "2026-11-09");
+  assert.deepEqual(reset, { batchPortions: 6, portionsLeft: 6, batchStartedAt: "2026-11-09" });
+  const cleared = batchFieldsFromForm("", { batchPortions: 4, portionsLeft: 2, batchStartedAt: "2026-11-07" }, "2026-11-09");
+  assert.deepEqual(cleared, { batchPortions: null, portionsLeft: null, batchStartedAt: null });
+});
+
+test("the last portion and a three-day-old batch leave leftovers without deleting the recipe", () => {
+  const chili = {
+    id: "chili",
+    name: "Example chili",
+    calories: 400,
+    batchPortions: 2,
+    portionsLeft: 1,
+    batchStartedAt: "2026-11-09",
+  };
+  assert.equal(leftoverVisible(chili, "2026-11-09"), true);
+  const last = decrementPortion(chili);
+  assert.equal(last.logged, true);
+  assert.equal(last.recipe.portionsLeft, 0);
+  assert.equal(last.recipe.batchPortions, 2);
+  assert.equal(last.recipe.batchStartedAt, "2026-11-09");
+  assert.equal(last.recipe.name, "Example chili");
+  assert.equal(last.recipe.calories, 400);
+  assert.equal(leftoverVisible(last.recipe, "2026-11-09"), false);
+
+  const soup = { name: "Example soup", batchPortions: 3, portionsLeft: 2, batchStartedAt: "2026-11-07" };
+  assert.equal(leftoverVisible(soup, "2026-11-07"), true);
+  assert.equal(leftoverVisible(soup, "2026-11-08"), true);
+  assert.equal(leftoverVisible(soup, "2026-11-09"), true);
+  assert.equal(leftoverVisible(soup, "2026-11-10"), false);
+  assert.equal(soup.batchPortions, 3);
+  assert.equal(soup.portionsLeft, 2);
+
+  const recent = { name: "Example oats", batchPortions: 2, portionsLeft: 2, updatedAt: "2026-11-08T15:00:00.000Z" };
+  assert.equal(leftoverVisible(recent, "2026-11-09"), true);
+  const old = { name: "Example oats", batchPortions: 2, portionsLeft: 2, updatedAt: "2026-11-01T15:00:00.000Z" };
+  assert.equal(leftoverVisible(old, "2026-11-09"), false);
+  const undated = { name: "Example oats", batchPortions: 2, portionsLeft: 2 };
+  assert.equal(leftoverVisible(undated, "2026-11-09"), true);
 });
 
 test("sync indicator is green when synced, amber while waiting, and red only on a real failure", () => {

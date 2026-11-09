@@ -455,3 +455,56 @@ test("an empty local backup list does not drop remote workout plan backups", () 
   assert.equal(merged.workoutPlanBackups.length, 1);
   assert.equal(merged.workoutPlanBackups[0].savedAt, "2026-01-01T00:00:00.000Z");
 });
+
+test("a recipe batch start date survives sync and is accepted from an inbox batch", () => {
+  const local = base({
+    recipes: [{
+      id: "chili",
+      name: "Example chili",
+      calories: 400,
+      batchPortions: 4,
+      portionsLeft: 3,
+      batchStartedAt: "2026-11-07",
+      updatedAt: EARLIER,
+    }],
+  });
+  const remote = base({
+    recipes: [{
+      id: "chili",
+      name: "Example chili bowl",
+      calories: 420,
+      batchPortions: 4,
+      portionsLeft: 2,
+      updatedAt: LATER,
+    }],
+  });
+  const kept = mergeDocuments(local, remote, { now: NOW }).document.recipes.find((item) => item.id === "chili");
+  assert.equal(kept.name, "Example chili bowl");
+  assert.equal(kept.calories, 420);
+  assert.equal(kept.batchPortions, 4);
+  assert.equal(kept.portionsLeft, 2);
+  assert.equal(kept.batchStartedAt, "2026-11-07");
+
+  const restarted = mergeDocuments(local, base({
+    recipes: [{
+      id: "chili",
+      name: "Example chili",
+      calories: 400,
+      batchPortions: 6,
+      portionsLeft: 6,
+      batchStartedAt: "2026-11-09",
+      updatedAt: LATER,
+    }],
+  }), { now: NOW }).document.recipes.find((item) => item.id === "chili");
+  assert.equal(restarted.batchStartedAt, "2026-11-09");
+  assert.equal(restarted.batchPortions, 6);
+
+  const inbox = mergeWithInbox(base(), {}, [inboxFile("batch-date.json", [
+    { type: "recipe", id: "soup", name: "Example soup", calories: 200, batchPortions: 3, portionsLeft: 3, batchStartedAt: "2026-11-08", updatedAt: NOW },
+    { type: "recipe", id: "stew", name: "Example stew", calories: 300, batchPortions: 2, portionsLeft: 1, updatedAt: "2026-11-06T12:00:00.000Z" },
+  ])], NOW);
+  assert.equal(inbox.document.recipes.find((item) => item.id === "soup").batchStartedAt, "2026-11-08");
+  assert.equal(inbox.document.recipes.find((item) => item.id === "soup").name, "Example soup");
+  assert.equal(inbox.document.recipes.find((item) => item.id === "stew").batchStartedAt, "2026-11-06");
+  assert.equal(inbox.document.recipes.find((item) => item.id === "stew").portionsLeft, 1);
+});
