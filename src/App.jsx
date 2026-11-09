@@ -26,7 +26,7 @@ import {
   workoutSummary,
 } from "./workoutSession.js";
 import { PROTEIN_NUDGE_DISMISSED_KEY, proteinNudge } from "./proteinNudge.js";
-import { MAIN_NAV, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods, dayLogEntries } from "./homeUx.js";
+import { MAIN_NAV, calorieProgress, swipeDayDelta, batchState, leftoverVisible, portionsLeftLabel, decrementPortion, batchFieldsFromForm, usualRecipes, searchRecipes, collectLoggedFoods, dayLogEntries, scaleLoggedFood, withEditedMacros, createDaySaver, PORTION_PRESETS } from "./homeUx.js";
 import {
   DEFAULT_TARGETS,
   DEFAULT_MILESTONES,
@@ -983,6 +983,67 @@ function ExerciseLogCard({ ex, dayKey, setsDone, exerciseLog, today, agreedWeigh
   );
 }
 
+function PortionAdjuster({ food, onApply }) {
+  const [custom, setCustom] = useState("");
+  const current = Number(food.portion) > 0 ? Number(food.portion) : 1;
+  function applyCustom() {
+    const amount = Number(custom);
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    onApply(amount);
+    setCustom("");
+  }
+  return (
+    <div className="px-2 pb-2">
+      <div className="flex gap-1 flex-wrap">
+        {PORTION_PRESETS.map((amount) => {
+          const selected = current === amount;
+          return (
+            <button
+              key={amount}
+              type="button"
+              onClick={() => onApply(amount)}
+              aria-pressed={selected}
+              aria-label={`Set portion to ${amount} times`}
+              className="font-mono rounded px-2 py-1"
+              style={{
+                fontSize: 12,
+                minHeight: 32,
+                background: selected ? palette.amber : palette.panel,
+                color: selected ? "#1B1815" : palette.text,
+                border: `1px solid ${selected ? palette.amber : palette.border}`,
+              }}
+            >
+              {amount}×
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex gap-1 mt-1">
+        <input
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step="0.1"
+          value={custom}
+          onChange={(e) => setCustom(e.target.value)}
+          placeholder="Custom"
+          aria-label="Custom portion"
+          className="font-mono rounded-lg px-2 py-1 text-sm outline-none border flex-1"
+          style={{ background: palette.panel, borderColor: palette.border, color: palette.text, minWidth: 0 }}
+        />
+        <button
+          type="button"
+          onClick={applyCustom}
+          className="font-display uppercase rounded-lg px-2"
+          style={{ color: palette.amber, border: `1px solid ${palette.amber}`, fontSize: 11, letterSpacing: "0.04em" }}
+        >
+          Set
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 export default function MacroConsole() {
   const [view, setView] = useState("console");
@@ -1028,7 +1089,7 @@ export default function MacroConsole() {
   const [logBusy, setLogBusy] = useState(false);
   const [logSuggestion, setLogSuggestion] = useState(null);
   const [pendingImages, setPendingImages] = useState([]);
-  const [expandedFoodId, setExpandedFoodId] = useState(null);
+  const [portionFoodId, setPortionFoodId] = useState(null);
   const [editFoodId, setEditFoodId] = useState(null);
   const [editFoodForm, setEditFoodForm] = useState({ name: "", calories: "", protein: "", carbs: "", fat: "", fiber: "" });
   const [bodyComp, setBodyComp] = useState([]);
@@ -1098,6 +1159,8 @@ export default function MacroConsole() {
   const historyRef = useRef(history);
   const metaRef = useRef(meta);
   const patchDayDebounce = useRef(null);
+  const daySaverRef = useRef(null);
+  const flushDaySaveRef = useRef(() => {});
   const restIntervalRef = useRef(null);
   const nextIndexRef = useRef(null);
   const sessionIndexRef = useRef(0);
@@ -1337,8 +1400,10 @@ export default function MacroConsole() {
   }
 
   function goToDate(ds) {
+    if (ds === dateStrRef.current) return;
+    flushDaySave();
+    setPortionFoodId(null);
     setDateStr(ds);
-    setExpandedFoodId(null);
     loadDay(ds);
   }
 
@@ -1422,7 +1487,7 @@ export default function MacroConsole() {
     if (foodForm.mealType) item.mealType = foodForm.mealType;
     const newDay = { ...dayData, foods: [...dayData.foods, item] };
     setDayData(newDay);
-    persist(newDay);
+    scheduleDaySave(newDay, dateStr);
     setFoodForm({ name: "", calories: "", protein: "", carbs: "", fat: "", fiber: "", mealType: foodForm.mealType || "" });
     setShowSuggestions(false);
   }
@@ -1445,7 +1510,7 @@ export default function MacroConsole() {
     });
     const newDay = { ...dayData, foods: [...dayData.foods, ...newFoods] };
     setDayData(newDay);
-    persist(newDay);
+    scheduleDaySave(newDay, dateStr);
   }
 
   function handleImageSelect(e) {
@@ -1636,6 +1701,47 @@ export default function MacroConsole() {
 
   const pendingPatchDay = useRef(null);
 
+  if (!daySaverRef.current) {
+    daySaverRef.current = createDaySaver({
+      write: (day, date) => daySaverRef.current.writeImpl(day, date),
+      sync: () => daySaverRef.current.syncImpl(),
+    });
+  }
+  daySaverRef.current.writeImpl = (day, date) => persist(day, date);
+  daySaverRef.current.syncImpl = () => queueCloudSync();
+
+  function scheduleDaySave(day, date) {
+    daySaverRef.current.schedule(day, date);
+  }
+
+  function flushDaySave() {
+    if (patchDayDebounce.current) {
+      clearTimeout(patchDayDebounce.current);
+      patchDayDebounce.current = null;
+    }
+    if (pendingPatchDay.current) {
+      const day = pendingPatchDay.current;
+      pendingPatchDay.current = null;
+      persist(day, dateStrRef.current);
+      queueCloudSync();
+    }
+    const wrote = daySaverRef.current.flush();
+    return wrote;
+  }
+  flushDaySaveRef.current = flushDaySave;
+
+  useEffect(() => {
+    const flush = () => { flushDaySaveRef.current(); };
+    window.addEventListener("pagehide", flush);
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+      flush();
+    };
+  }, []);
+
   function patchDay(patcher) {
     if (dayData.locked) return;
     const targetDate = dateStr;
@@ -1647,8 +1753,10 @@ export default function MacroConsole() {
     if (patchDayDebounce.current) clearTimeout(patchDayDebounce.current);
     patchDayDebounce.current = setTimeout(() => {
       if (pendingPatchDay.current) {
-        persist(pendingPatchDay.current, targetDate);
+        const day = pendingPatchDay.current;
         pendingPatchDay.current = null;
+        persist(day, targetDate);
+        queueCloudSync();
       }
     }, 700);
   }
@@ -2181,7 +2289,7 @@ export default function MacroConsole() {
     if (r.mealType) item.mealType = r.mealType;
     const newDay = { ...dayData, foods: [...dayData.foods, item] };
     setDayData(newDay);
-    persist(newDay);
+    scheduleDaySave(newDay, dateStr);
     showToast(mult === 1 ? "Added to log" : `Added ${mult} servings to log`);
   }
 
@@ -2210,9 +2318,11 @@ export default function MacroConsole() {
   function deleteFood(id) {
     const item = dayData.foods.find((f) => f.id === id);
     if (!item) return;
+    const loggedDate = dateStr;
     const newDay = { ...dayData, foods: dayData.foods.filter((f) => f.id !== id) };
-    const tomb = { collection: "foods", id, date: dateStr };
+    const tomb = { collection: "foods", id, date: loggedDate };
     recordTombstone(tomb);
+    if (daySaverRef.current) daySaverRef.current.drop();
     setDayData(newDay);
     showUndoToast(
       `Removed "${item.name}"`,
@@ -2220,10 +2330,23 @@ export default function MacroConsole() {
         forgetTombstone(tomb);
         const restoredDay = { ...newDay, foods: [...newDay.foods, item] };
         setDayData(restoredDay);
-        persist(restoredDay);
+        persist(restoredDay, loggedDate);
+        queueCloudSync();
       },
-      () => { persist(newDay); }
+      () => {
+        persist(newDay, loggedDate);
+        queueCloudSync();
+      }
     );
+  }
+
+  function applyPortion(food, multiplier) {
+    if (dayData.locked) return;
+    const nextFood = scaleLoggedFood(food, multiplier, new Date().toISOString());
+    if (nextFood === food) return;
+    const newDay = { ...dayData, foods: dayData.foods.map((item) => item.id === food.id ? nextFood : item) };
+    setDayData(newDay);
+    scheduleDaySave(newDay, dateStr);
   }
 
   function openEditFood(f) {
@@ -2238,14 +2361,17 @@ export default function MacroConsole() {
     if (!editFoodId || !editFoodForm.name.trim()) return;
     const newDay = {
       ...dayData,
-      foods: dayData.foods.map((f) => f.id === editFoodId ? {
-        ...f, name: editFoodForm.name.trim(),
-        calories: Number(editFoodForm.calories) || 0, protein: Number(editFoodForm.protein) || 0,
-        carbs: Number(editFoodForm.carbs) || 0, fat: Number(editFoodForm.fat) || 0, fiber: Number(editFoodForm.fiber) || 0,
-      } : f),
+      foods: dayData.foods.map((f) => f.id === editFoodId ? withEditedMacros(f, {
+        name: editFoodForm.name.trim(),
+        calories: Number(editFoodForm.calories) || 0,
+        protein: Number(editFoodForm.protein) || 0,
+        carbs: Number(editFoodForm.carbs) || 0,
+        fat: Number(editFoodForm.fat) || 0,
+        fiber: Number(editFoodForm.fiber) || 0,
+      }, new Date().toISOString()) : f),
     };
     setDayData(newDay);
-    persist(newDay);
+    scheduleDaySave(newDay, dateStr);
     setEditFoodId(null);
     showToast("Item updated");
   }
@@ -3523,30 +3649,20 @@ export default function MacroConsole() {
                     Today
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={dayData.locked ? handleUnlock : handleLock}
+                  aria-label={dayData.locked ? "Unlock day" : "Lock day"}
+                  className="p-1.5 rounded-lg"
+                  style={{ border: `1px solid ${dayData.locked ? palette.amber : palette.border}`, color: dayData.locked ? palette.amber : palette.textMuted }}
+                >
+                  {dayData.locked ? <Unlock size={16} /> : <Lock size={16} />}
+                </button>
               </div>
               <button onClick={() => !atMaxDate && goToDate(addDays(dateStr, 1))} disabled={atMaxDate} className="p-2 rounded-lg" style={{ border: `1px solid ${palette.border}`, opacity: atMaxDate ? 0.3 : 1 }}>
                 <ChevronRight size={16} style={{ color: palette.text }} />
               </button>
             </div>
-
-            {/* Save / Lock bar */}
-            {!dayData.locked ? (
-              <div className="flex gap-2 mb-4">
-                <Button onClick={handleSave} variant="ghost" grow>Save</Button>
-                <Button onClick={handleLock} variant="primary" grow>
-                  <span className="flex items-center justify-center gap-1"><Lock size={14} /> Lock day</span>
-                </Button>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between mb-4 rounded-lg px-3 py-2" style={{ border: `1px solid ${palette.border}`, background: palette.panelAlt }}>
-                <span className="font-mono flex items-center gap-1" style={{ color: palette.textMuted, fontSize: 12 }}>
-                  <Lock size={13} /> Day locked
-                </span>
-                <button onClick={handleUnlock} className="font-display uppercase flex items-center gap-1" style={{ color: palette.amber, fontSize: 11, letterSpacing: "0.06em" }}>
-                  <Unlock size={13} /> Unlock
-                </button>
-              </div>
-            )}
 
             {dayLoading ? (
               <div className="flex justify-center py-10"><Loader2 className="animate-spin" size={22} style={{ color: palette.amber }} /></div>
@@ -3653,12 +3769,14 @@ export default function MacroConsole() {
                 <div className="space-y-1">
                   {dayLogEntries(dayData.foods).map((f) => {
                     const hasComponents = f.components && f.components.length > 0;
-                    const isExpanded = expandedFoodId === f.id;
+                    const portionOpen = portionFoodId === f.id;
                     return (
                       <div key={f.id} className="rounded-lg overflow-hidden" style={{ background: palette.panelAlt }}>
                         <div className="flex items-center justify-between px-2 py-2">
                           <button
-                            onClick={() => hasComponents && setExpandedFoodId(isExpanded ? null : f.id)}
+                            type="button"
+                            onClick={() => setPortionFoodId(portionOpen ? null : f.id)}
+                            aria-expanded={portionOpen}
                             className="min-w-0 pr-2 flex-1 flex items-center gap-1 text-left"
                           >
                             <div className="min-w-0">
@@ -3668,33 +3786,35 @@ export default function MacroConsole() {
                                 {hasComponents && ` · ${f.components.length} ingredients`}
                               </div>
                             </div>
-                            {hasComponents && (
-                              <ChevronDown size={14} style={{ color: palette.textFaint, transform: isExpanded ? "rotate(180deg)" : "none", transition: "transform 0.2s ease", flexShrink: 0 }} />
-                            )}
                           </button>
-                          <button onClick={() => openEditFood(f)} aria-label="Edit item" className="flex-shrink-0">
+                          <button type="button" onClick={() => openEditFood(f)} aria-label="Edit item" className="flex-shrink-0">
                             <Pencil size={14} style={{ color: palette.textFaint }} />
                           </button>
-                          <button onClick={() => saveFoodAsRecipe(f)} aria-label="Save as recipe" className="flex-shrink-0 ml-2">
+                          <button type="button" onClick={() => saveFoodAsRecipe(f)} aria-label="Save as recipe" className="flex-shrink-0 ml-2">
                             <BookmarkPlus size={15} style={{ color: palette.textFaint }} />
                           </button>
-                          <button onClick={() => deleteFood(f.id)} aria-label="Remove item" className="flex-shrink-0 ml-2">
+                          <button type="button" onClick={() => deleteFood(f.id)} aria-label="Remove item" className="flex-shrink-0 ml-2">
                             <X size={16} style={{ color: palette.textFaint }} />
                           </button>
                         </div>
-                        {hasComponents && isExpanded && (
-                          <div className="px-2 pb-2">
-                            <div className="rounded-lg p-2 space-y-1" style={{ background: palette.panel }}>
-                              {f.components.map((c) => (
-                                <div key={c.id} className="flex items-center justify-between gap-2">
-                                  <span className="text-xs truncate" style={{ color: palette.text }}>{c.name}</span>
-                                  <span className="font-mono flex-shrink-0" style={{ color: palette.textFaint, fontSize: 10 }}>
-                                    {Math.round(c.calories)} cal · {Math.round(c.protein)}P {Math.round(c.carbs)}C {Math.round(c.fat)}F
-                                  </span>
+                        {portionOpen && (
+                          <>
+                            <PortionAdjuster food={f} onApply={(amount) => applyPortion(f, amount)} />
+                            {hasComponents && (
+                              <div className="px-2 pb-2">
+                                <div className="rounded-lg p-2 space-y-1" style={{ background: palette.panel }}>
+                                  {f.components.map((c) => (
+                                    <div key={c.id} className="flex items-center justify-between gap-2">
+                                      <span className="text-xs truncate" style={{ color: palette.text }}>{c.name}</span>
+                                      <span className="font-mono flex-shrink-0" style={{ color: palette.textFaint, fontSize: 10 }}>
+                                        {Math.round(c.calories)} cal · {Math.round(c.protein)}P {Math.round(c.carbs)}C {Math.round(c.fat)}F
+                                      </span>
+                                    </div>
+                                  ))}
                                 </div>
-                              ))}
-                            </div>
-                          </div>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     );
@@ -3706,11 +3826,6 @@ export default function MacroConsole() {
                 </div>
               )}
             </Panel>
-            </div>
-            <div className="mb-3">
-              <Button onClick={handleCopyDay} variant="ghost" full>
-                <span className="flex items-center justify-center gap-1"><Copy size={14} /> Copy day for Claude</span>
-              </Button>
             </div>
             </>
             )}
@@ -4834,6 +4949,14 @@ export default function MacroConsole() {
             <div className="flex items-center justify-between mb-4">
               <div className="font-display uppercase" style={{ color: palette.text, fontSize: 16, letterSpacing: "0.06em" }}>Settings</div>
               <button onClick={closeSettings} aria-label="Close"><X size={18} style={{ color: palette.textMuted }} /></button>
+            </div>
+            <div className="mb-4">
+              <Button onClick={handleCopyDay} variant="ghost" full>
+                <span className="flex items-center justify-center gap-1"><Copy size={14} /> Copy day for Claude</span>
+              </Button>
+              <div className="font-mono mt-1" style={{ color: palette.textFaint, fontSize: 11 }}>
+                Copies the day currently open.
+              </div>
             </div>
             <div className="space-y-3">
               {[
