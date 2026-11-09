@@ -70,6 +70,62 @@ export function decrementPortion(recipe) {
   };
 }
 
+export const USUAL_LIMIT = 8;
+
+export function recipeNameKey(name) {
+  return String(name || "").replace(/\s*\(\d+(?:\.\d+)?x\)$/i, "").trim().toLowerCase();
+}
+
+export function collectLoggedFoods(dayRecords, current) {
+  const foods = [];
+  const currentDate = current && current.date;
+  for (const rec of dayRecords || []) {
+    if (!rec || (currentDate && rec.date === currentDate)) continue;
+    const list = rec.day && rec.day.foods;
+    if (Array.isArray(list)) foods.push(...list);
+  }
+  if (current && Array.isArray(current.foods)) foods.push(...current.foods);
+  return foods;
+}
+
+// Pinned recipes first, then the names logged most often. The full book stays out of the list.
+export function usualRecipes(recipes, foods, pinnedIds, limit = USUAL_LIMIT) {
+  const pinned = new Set((pinnedIds || []).map((id) => String(id)));
+  const counts = new Map();
+  for (const food of foods || []) {
+    const key = recipeNameKey(food && food.name);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  const pinnedRows = [];
+  const frequent = [];
+  for (const recipe of recipes || []) {
+    if (!recipe || !recipe.name) continue;
+    const key = recipeNameKey(recipe.name);
+    const count = counts.get(key) || 0;
+    const id = recipe.id != null ? String(recipe.id) : key;
+    if (pinned.has(id)) pinnedRows.push({ recipe, count, id });
+    else if (count > 0) frequent.push({ recipe, count, id });
+  }
+  pinnedRows.sort((a, b) => b.count - a.count || a.recipe.name.localeCompare(b.recipe.name));
+  frequent.sort((a, b) => b.count - a.count || a.recipe.name.localeCompare(b.recipe.name));
+  const chosen = [];
+  const seen = new Set();
+  for (const row of [...pinnedRows, ...frequent]) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    chosen.push(row.recipe);
+    if (chosen.length >= limit) break;
+  }
+  return chosen;
+}
+
+export function searchRecipes(recipes, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return [];
+  return (recipes || []).filter((recipe) => recipe && recipeNameKey(recipe.name).includes(q));
+}
+
 export function batchFieldsFromForm(raw, previous) {
   const text = String(raw == null ? "" : raw).trim();
   if (!text) return { batchPortions: null, portionsLeft: null };
